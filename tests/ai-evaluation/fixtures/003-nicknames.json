@@ -1,0 +1,16 @@
+{
+  "id": "003-nicknames",
+  "description": "Character nicknames",
+  "answers": {
+    "Q3": [
+      "ミオ様",
+      "アキラくん"
+    ]
+  },
+  "expected": {
+    "Q3": [
+      "W001-C2",
+      "W001-C1"
+    ]
+  }
+}

@@ -1,0 +1,155 @@
+// Anime master importer (client-supplied data, A-06). No scraping.
+//
+// Reads the CSV templates in a directory (see templates/anime-master/README.md),
+// validates them, and emits idempotent SQL (upsert by external_code; IDs are
+// deterministic: md5('conime/<entity>/<external_code>')::uuid).
+//
+//   deno run -A scripts/import-anime-master.ts --dir templates/anime-master --out /tmp/master.sql
+//   deno run -A scripts/import-anime-master.ts --dir <dir> --apply   # uses CONIME_DB_URL
+import { parse } from "@std/csv";
+import postgres from "postgres";
+import { normalizeAlias } from "../supabase/functions/_shared/domain/normalize.ts";
+
+type Row = Record<string, string>;
+export interface MasterData {
+  works: Row[];
+  workAliases: Row[];
+  characters: Row[];
+  characterAliases: Row[];
+  tags: Row[];
+  tagAliases: Row[];
+  workTags: Row[];
+}
+
+const FILES: Record<keyof MasterData, { file: string; required: string[] }> = {
+  works: { file: "anime_works.csv", required: ["external_code", "title"] },
+  workAliases: { file: "work_aliases.csv", required: ["work_external_code", "alias"] },
+  characters: { file: "anime_characters.csv", required: ["external_code", "name"] },
+  characterAliases: { file: "character_aliases.csv", required: ["character_external_code", "alias"] },
+  tags: { file: "tags.csv", required: ["kind", "code", "name"] },
+  tagAliases: { file: "tag_aliases.csv", required: ["tag_kind", "tag_code", "alias"] },
+  workTags: { file: "work_tags.csv", required: ["work_external_code", "tag_kind", "tag_code"] },
+};
+
+export async function readMaster(dir: string): Promise<MasterData> {
+  const out = {} as MasterData;
+  for (const [key, spec] of Object.entries(FILES) as Array<[keyof MasterData, typeof FILES[keyof MasterData]]>) {
+    let text = "";
+    try {
+      text = await Deno.readTextFile(`${dir}/${spec.file}`);
+    } catch {
+      out[key] = [];
+      continue;
+    }
+    const rows = parse(text.replace(/^﻿/, ""), { skipFirstRow: true }) as Row[];
+    out[key] = rows.filter((r) => Object.values(r).some((v) => (v ?? "").trim() !== "" && !(v ?? "").startsWith("#")));
+  }
+  return out;
+}
+
+export function validateMaster(m: MasterData): string[] {
+  const errors: string[] = [];
+  for (const [key, spec] of Object.entries(FILES) as Array<[keyof MasterData, typeof FILES[keyof MasterData]]>) {
+    m[key].forEach((r, i) => {
+      for (const f of spec.required) if (!r[f]?.trim()) errors.push(`${spec.file}:${i + 2} missing ${f}`);
+    });
+  }
+  const dup = (rows: Row[], k: (r: Row) => string, file: string) => {
+    const seen = new Set<string>();
+    rows.forEach((r, i) => {
+      const v = k(r);
+      if (seen.has(v)) errors.push(`${file}:${i + 2} duplicate ${v}`);
+      seen.add(v);
+    });
+  };
+  dup(m.works, (r) => r.external_code, "anime_works.csv");
+  dup(m.characters, (r) => r.external_code, "anime_characters.csv");
+  dup(m.tags, (r) => `${r.kind}:${r.code}`, "tags.csv");
+  const works = new Set(m.works.map((r) => r.external_code));
+  const chars = new Set(m.characters.map((r) => r.external_code));
+  const tags = new Set(m.tags.map((r) => `${r.kind}:${r.code}`));
+  const kinds = new Set(["genre", "world_setting", "guild_topic"]);
+  m.tags.forEach((r, i) => !kinds.has(r.kind) && errors.push(`tags.csv:${i + 2} invalid kind ${r.kind}`));
+  m.works.forEach((r, i) => r.status && !["active", "inactive"].includes(r.status) && errors.push(`anime_works.csv:${i + 2} invalid status`));
+  m.workAliases.forEach((r, i) => !works.has(r.work_external_code) && errors.push(`work_aliases.csv:${i + 2} unknown work ${r.work_external_code}`));
+  m.characters.forEach((r, i) => r.work_external_code && !works.has(r.work_external_code) && errors.push(`anime_characters.csv:${i + 2} unknown work`));
+  m.characterAliases.forEach((r, i) => !chars.has(r.character_external_code) && errors.push(`character_aliases.csv:${i + 2} unknown character`));
+  m.tagAliases.forEach((r, i) => !tags.has(`${r.tag_kind}:${r.tag_code}`) && errors.push(`tag_aliases.csv:${i + 2} unknown tag`));
+  m.workTags.forEach((r, i) => {
+    if (!works.has(r.work_external_code)) errors.push(`work_tags.csv:${i + 2} unknown work`);
+    if (!tags.has(`${r.tag_kind}:${r.tag_code}`)) errors.push(`work_tags.csv:${i + 2} unknown tag`);
+  });
+  [...m.workAliases, ...m.characterAliases, ...m.tagAliases].forEach((r) => {
+    if (normalizeAlias(r.alias ?? "").length === 0) errors.push(`alias "${r.alias}" is empty after normalization`);
+  });
+  return errors;
+}
+
+const q = (s: string | undefined | null) => (s === undefined || s === null || s.trim() === "" ? "null" : `'${s.trim().replace(/'/g, "''")}'`);
+const uid = (entity: string, code: string) => `md5(${q(`conime/${entity}/${code}`)})::uuid`;
+const tagId = (kind: string, code: string) => `(select id from app.tags where kind = ${q(kind)} and code = ${q(code)})`;
+
+export function masterToSql(m: MasterData): string {
+  const lines: string[] = ["-- generated by scripts/import-anime-master.ts", "begin;"];
+  for (const t of m.tags) {
+    lines.push(`insert into app.tags (kind, code, name) values (${q(t.kind)}, ${q(t.code)}, ${q(t.name)}) on conflict (kind, code) do update set name = excluded.name;`);
+  }
+  const tagAlias = (kind: string, code: string, alias: string) =>
+    `insert into app.tag_aliases (tag_id, alias, alias_normalized) values (${tagId(kind, code)}, ${q(alias)}, ${q(normalizeAlias(alias))}) on conflict do nothing;`;
+  for (const t of m.tags) lines.push(tagAlias(t.kind, t.code, t.name));
+  for (const a of m.tagAliases) lines.push(tagAlias(a.tag_kind, a.tag_code, a.alias));
+
+  for (const w of m.works) {
+    lines.push(`insert into app.anime_works (id, external_code, title, title_kana, summary, start_year, status) values (${uid("work", w.external_code)}, ${q(w.external_code)}, ${q(w.title)}, ${q(w.title_kana)}, ${q(w.summary)}, ${w.start_year?.trim() ? Number(w.start_year) : "null"}, ${q(w.status || "active")}) on conflict (external_code) do update set title = excluded.title, title_kana = excluded.title_kana, summary = excluded.summary, start_year = excluded.start_year, status = excluded.status;`);
+  }
+  const workAlias = (code: string, alias: string) =>
+    `insert into app.work_aliases (work_id, alias, alias_normalized) values ((select id from app.anime_works where external_code = ${q(code)}), ${q(alias)}, ${q(normalizeAlias(alias))}) on conflict do nothing;`;
+  for (const w of m.works) {
+    lines.push(workAlias(w.external_code, w.title));
+    if (w.title_kana?.trim()) lines.push(workAlias(w.external_code, w.title_kana));
+  }
+  for (const a of m.workAliases) lines.push(workAlias(a.work_external_code, a.alias));
+
+  for (const c of m.characters) {
+    lines.push(`insert into app.anime_characters (id, external_code, work_id, name, name_kana, status) values (${uid("character", c.external_code)}, ${q(c.external_code)}, ${c.work_external_code?.trim() ? `(select id from app.anime_works where external_code = ${q(c.work_external_code)})` : "null"}, ${q(c.name)}, ${q(c.name_kana)}, ${q(c.status || "active")}) on conflict (external_code) do update set name = excluded.name, name_kana = excluded.name_kana, work_id = excluded.work_id, status = excluded.status;`);
+  }
+  const charAlias = (code: string, alias: string) =>
+    `insert into app.character_aliases (character_id, alias, alias_normalized) values ((select id from app.anime_characters where external_code = ${q(code)}), ${q(alias)}, ${q(normalizeAlias(alias))}) on conflict do nothing;`;
+  for (const c of m.characters) {
+    lines.push(charAlias(c.external_code, c.name));
+    if (c.name_kana?.trim()) lines.push(charAlias(c.external_code, c.name_kana));
+  }
+  for (const a of m.characterAliases) lines.push(charAlias(a.character_external_code, a.alias));
+
+  for (const wt of m.workTags) {
+    lines.push(`insert into app.work_tags (work_id, tag_id) values ((select id from app.anime_works where external_code = ${q(wt.work_external_code)}), ${tagId(wt.tag_kind, wt.tag_code)}) on conflict do nothing;`);
+  }
+  lines.push("commit;");
+  return lines.join("\n") + "\n";
+}
+
+if (import.meta.main) {
+  const args = Deno.args;
+  const dir = args[args.indexOf("--dir") + 1];
+  if (!dir || args.indexOf("--dir") < 0) {
+    console.error("usage: import-anime-master.ts --dir <csv dir> [--out file.sql | --apply]");
+    Deno.exit(2);
+  }
+  const m = await readMaster(dir);
+  const errors = validateMaster(m);
+  if (errors.length) {
+    console.error(`validation failed (${errors.length}):\n` + errors.slice(0, 50).join("\n"));
+    Deno.exit(1);
+  }
+  const sql = masterToSql(m);
+  if (args.includes("--apply")) {
+    const db = postgres(Deno.env.get("CONIME_DB_URL") ?? Deno.env.get("SUPABASE_DB_URL")!, { max: 1, onnotice: () => {} });
+    await db.unsafe(sql);
+    await db.end();
+    console.log(`imported ${m.works.length} works, ${m.characters.length} characters, ${m.tags.length} tags`);
+  } else {
+    const out = args.indexOf("--out") >= 0 ? args[args.indexOf("--out") + 1] : null;
+    if (out) await Deno.writeTextFile(out, sql);
+    else console.log(sql);
+  }
+}

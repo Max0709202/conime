@@ -1,0 +1,20 @@
+{
+  "id": "004-width-variants",
+  "description": "Full-width / half-width variants",
+  "answers": {
+    "Q1": [
+      "星屑の　アルカディア！"
+    ],
+    "Q11": [
+      "ｽﾍﾟｰｽ"
+    ]
+  },
+  "expected": {
+    "Q1": [
+      "W001"
+    ],
+    "Q11": [
+      "world_setting:space"
+    ]
+  }
+}

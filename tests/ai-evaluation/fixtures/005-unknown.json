@@ -1,0 +1,13 @@
+{
+  "id": "005-unknown",
+  "description": "Unknown works stay unresolved (no invented IDs)",
+  "answers": {
+    "Q1": [
+      "存在しない作品タイトル",
+      "全く知らないアニメ"
+    ]
+  },
+  "expected": {
+    "Q1": []
+  }
+}

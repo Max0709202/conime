@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.local
+.env.*.local
+*.log
+.local/
+supabase/.branches
+supabase/.temp
+tests/load/results/
+tests/ai-evaluation/results/
+coverage/
+.dev-storage/
+tests/load/*.local.json
+tests/realtime/results/

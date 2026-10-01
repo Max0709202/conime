@@ -1,0 +1,14 @@
+{
+  "id": "008-typo",
+  "description": "Near-miss spelling (AI path)",
+  "answers": {
+    "Q1": [
+      "星くずのアルカディア"
+    ]
+  },
+  "expected": {
+    "Q1": [
+      "W001"
+    ]
+  }
+}

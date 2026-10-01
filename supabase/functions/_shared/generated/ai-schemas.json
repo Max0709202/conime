@@ -1,0 +1,212 @@
+{
+  "anime-recs-output-v1": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "anime-recs-output-v1",
+    "title": "Anime recommendation selection",
+    "description": "work_id must be one of the supplied candidate IDs; at most result_limit items.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "recommendations"
+    ],
+    "properties": {
+      "recommendations": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "work_id",
+            "reason"
+          ],
+          "properties": {
+            "work_id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "navigator-output-v1": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "navigator-output-v1",
+    "title": "Navigator reply",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "reply",
+      "suggestions"
+    ],
+    "properties": {
+      "reply": {
+        "type": "string"
+      },
+      "suggestions": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "normalization-output-v1": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "normalization-output-v1",
+    "title": "Free-text normalization result",
+    "description": "matched_id must be one of the candidate IDs supplied for that item, or null.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "results"
+    ],
+    "properties": {
+      "results": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "item_id",
+            "matched_id",
+            "confidence"
+          ],
+          "properties": {
+            "item_id": {
+              "type": "string"
+            },
+            "matched_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    }
+  },
+  "profile-output-v1": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "profile-output-v1",
+    "title": "Character and profile generation result",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "character",
+      "profile"
+    ],
+    "properties": {
+      "character": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "character_class",
+          "title",
+          "personality",
+          "strengths",
+          "weaknesses",
+          "skills",
+          "visual_description"
+        ],
+        "properties": {
+          "character_class": {
+            "type": "string",
+            "description": "クラス (Japanese, ≤ 20 chars)"
+          },
+          "title": {
+            "type": "string",
+            "description": "称号 (Japanese, ≤ 24 chars)"
+          },
+          "personality": {
+            "type": "string",
+            "description": "性格 (Japanese, ≤ 120 chars)"
+          },
+          "strengths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "得意 2–3 items"
+          },
+          "weaknesses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "苦手 2–3 items"
+          },
+          "skills": {
+            "type": "array",
+            "description": "Exactly 3 initial skills",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "description"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "visual_description": {
+            "type": "string",
+            "description": "English appearance description; no franchise, character, artist or studio names"
+          }
+        }
+      },
+      "profile": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "comments",
+          "conversation_topics"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "comments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "question_code",
+                "text"
+              ],
+              "properties": {
+                "question_code": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "conversation_topics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

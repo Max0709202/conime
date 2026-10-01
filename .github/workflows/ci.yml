@@ -1,0 +1,89 @@
+# Backend CI. Job "linux" mirrors the verified Docker-less path (scripts/test-all.sh).
+# Job "supabase-stack" runs the real Supabase images (Docker on GitHub runners) to cover
+# what the user-space setup cannot: GoTrue, Storage server, Realtime WebSocket delivery.
+# NOTE: the supabase-stack job has not been executed yet; verify it on its first CI run.
+name: backend-ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with: { deno-version: v2.x }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 8.0.x }
+      - run: npm ci || npm install
+      - name: Generated artifacts are up to date
+        run: |
+          deno task schemas
+          deno run -A scripts/generate-postman.ts
+          deno run -A scripts/generate-csharp-dtos.ts
+          git diff --exit-code -- schemas supabase/functions/_shared/generated postman unity-contracts/Generated
+      - name: Lint, type-check, unit, pgTAP, integration
+        run: scripts/test-all.sh
+      - name: Postman collection (newman) against the dev server
+        run: |
+          scripts/db-local.sh reset --seed
+          scripts/dev-api.sh > dev.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8787/v1/health && break; sleep 1; done
+          npx newman run postman/CONIME_Backend.postman_collection.json -e postman/local.postman_environment.json
+      - name: C# DTO contract check
+        run: |
+          deno run -A scripts/capture-contract-fixtures.ts
+          cd tests/unity-contracts && dotnet run
+      - name: Mint local load-test tokens
+        run: deno run -A scripts/mint-tokens.ts > tests/load/tokens.local.json
+      - name: Load smoke (k6, 30 s at MVP peak)
+        uses: grafana/run-k6-action@v1
+        env:
+          TOKENS_FILE: ${{ github.workspace }}/tests/load/tokens.local.json
+          DURATION: 30s
+        with:
+          path: tests/load/mvp-traffic.js
+        continue-on-error: true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: logs, path: dev.log, if-no-files-found: ignore }
+
+  supabase-stack:
+    runs-on: ubuntu-24.04
+    needs: linux
+    env:
+      TEST_PASSWORD: Password123!
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with: { deno-version: v2.x }
+      - uses: supabase/setup-cli@v1
+        with: { version: latest }
+      - run: supabase start
+      - run: supabase db reset
+      - run: supabase test db
+      - name: Serve functions
+        run: |
+          supabase status -o env > .supabase.env
+          set -a; source .supabase.env; set +a
+          cat > .env.functions <<EOF
+          CONIME_ENV=test
+          AI_PROVIDER=mock
+          STORAGE_DRIVER=supabase
+          WORKER_SECRET=ci-worker-secret
+          CONIME_DB_URL=postgresql://postgres:postgres@supabase_db_conime:5432/postgres
+          CONIME_JWT_SECRET=$JWT_SECRET
+          CONIME_JWT_ISSUER=$API_URL/auth/v1
+          EOF
+          supabase functions serve --env-file .env.functions > functions.log 2>&1 &
+          sleep 15
+      - name: Realtime headless scenarios
+        run: |
+          set -a; source .supabase.env; set +a
+          SUPABASE_URL="$API_URL" SUPABASE_ANON_KEY="$ANON_KEY" API_BASE_URL="$API_URL/functions/v1/api" deno task test:realtime
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: supabase-logs, path: "functions.log\ntests/realtime/results/", if-no-files-found: ignore }

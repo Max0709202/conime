@@ -1,0 +1,63 @@
+{
+  "rule_version": "user-v1",
+  "description": "概要8 フレンド: base 50 + exact-match points with per-item caps. Fixtures use symbolic match keys; scoring only depends on equality.",
+  "cases": [
+    {
+      "name": "設計05-C worked example → 66%",
+      "a": [
+        {"question_code": "Q1", "match_key": "work:A"}, {"question_code": "Q1", "match_key": "work:B"}, {"question_code": "Q1", "match_key": "work:C"},
+        {"question_code": "Q3", "match_key": "char:a"}, {"question_code": "Q3", "match_key": "char:b"}, {"question_code": "Q3", "match_key": "char:c"},
+        {"question_code": "Q9", "match_key": "opt:Q9:A"}, {"question_code": "Q9", "match_key": "opt:Q9:B"}, {"question_code": "Q9", "match_key": "opt:Q9:D"},
+        {"question_code": "Q13", "match_key": "opt:Q13:A"}
+      ],
+      "b": [
+        {"question_code": "Q1", "match_key": "work:A", "label": "作品A"}, {"question_code": "Q1", "match_key": "work:B", "label": "作品B"}, {"question_code": "Q1", "match_key": "work:D", "label": "作品D"},
+        {"question_code": "Q3", "match_key": "char:a", "label": "キャラa"}, {"question_code": "Q3", "match_key": "char:d", "label": "キャラd"}, {"question_code": "Q3", "match_key": "char:e", "label": "キャラe"},
+        {"question_code": "Q9", "match_key": "opt:Q9:A", "label": "視聴・読書"}, {"question_code": "Q9", "match_key": "opt:Q9:G", "label": "考察"}, {"question_code": "Q9", "match_key": "opt:Q9:D", "label": "聖地巡礼"},
+        {"question_code": "Q13", "match_key": "opt:Q13:B", "label": "一人で没頭"}
+      ],
+      "expected_score": 66,
+      "expected_items": {"Q1": 8, "Q3": 4, "Q9": 4}
+    },
+    {
+      "name": "every item matched → 100%",
+      "a": "@full", "b": "@full",
+      "expected_score": 100,
+      "expected_items": {"Q1": 12, "Q3": 12, "Q6": 2, "Q7": 2, "Q8": 2, "Q9": 6, "Q11": 2, "Q13": 2, "Q14": 2, "Q15": 2, "Q16": 2, "Q17": 2, "Q18": 2}
+    },
+    {
+      "name": "caps: 4 works and 2 childhood works still score 12 and 2",
+      "a": [
+        {"question_code": "Q1", "match_key": "w1"}, {"question_code": "Q1", "match_key": "w2"}, {"question_code": "Q1", "match_key": "w3"}, {"question_code": "Q1", "match_key": "w4"},
+        {"question_code": "Q7", "match_key": "c1"}, {"question_code": "Q7", "match_key": "c2"}
+      ],
+      "b": [
+        {"question_code": "Q1", "match_key": "w1", "label": "1"}, {"question_code": "Q1", "match_key": "w2", "label": "2"}, {"question_code": "Q1", "match_key": "w3", "label": "3"}, {"question_code": "Q1", "match_key": "w4", "label": "4"},
+        {"question_code": "Q7", "match_key": "c1", "label": "c1"}, {"question_code": "Q7", "match_key": "c2", "label": "c2"}
+      ],
+      "expected_score": 64,
+      "expected_items": {"Q1": 12, "Q7": 2}
+    },
+    {
+      "name": "similar but not identical answers give no points",
+      "a": [{"question_code": "Q6", "match_key": "opt:Q6:C"}, {"question_code": "Q16", "match_key": "opt:Q16:A"}],
+      "b": [{"question_code": "Q6", "match_key": "opt:Q6:D", "label": "月6作以上"}, {"question_code": "Q16", "match_key": "opt:Q16:B", "label": "正面から突破"}],
+      "expected_score": 50,
+      "expected_items": {}
+    },
+    {
+      "name": "same value under a different question does not match",
+      "a": [{"question_code": "Q1", "match_key": "work:X"}],
+      "b": [{"question_code": "Q7", "match_key": "work:X", "label": "X"}],
+      "expected_score": 50,
+      "expected_items": {}
+    },
+    {
+      "name": "questions not used for matching (Q2, Q19, Q20) score nothing",
+      "a": [{"question_code": "Q19", "match_key": "opt:Q19:A"}, {"question_code": "Q20", "match_key": "opt:Q20:A"}],
+      "b": [{"question_code": "Q19", "match_key": "opt:Q19:A", "label": "モンスター"}, {"question_code": "Q20", "match_key": "opt:Q20:A", "label": "かわいい"}],
+      "expected_score": 50,
+      "expected_items": {}
+    }
+  ]
+}

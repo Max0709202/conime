@@ -1,0 +1,15 @@
+{
+  "name": "conime-backend-tooling",
+  "private": true,
+  "description": "Node-based tooling only (OpenAPI lint, mock server, Postman/newman). Runtime code is Deno.",
+  "scripts": {
+    "lint:openapi": "redocly lint openapi/openapi.yaml",
+    "mock": "prism mock -p 4010 openapi/openapi.yaml",
+    "postman:local": "newman run postman/CONIME_Backend.postman_collection.json -e postman/local.postman_environment.json"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^2.0.0",
+    "@stoplight/prism-cli": "^5.14.2",
+    "newman": "^6.2.1"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "id": "007-genre-aliases",
+  "description": "Genre aliases",
+  "answers": {
+    "Q8": [
+      "スポ根"
+    ]
+  },
+  "expected": {
+    "Q8": [
+      "genre:sports"
+    ]
+  }
+}
