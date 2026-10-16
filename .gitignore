@@ -1,14 +1,18 @@
-node_modules/
+# 環境変数（.env.example のみコミットする）
 .env
-.env.local
-.env.*.local
-*.log
-.local/
+.env.*
+!.env.example
+supabase/functions/.env
+
+# Supabase CLI のローカル生成物
 supabase/.branches
 supabase/.temp
-tests/load/results/
-tests/ai-evaluation/results/
-coverage/
-.dev-storage/
-tests/load/*.local.json
-tests/realtime/results/
+
+# Node / Newman
+node_modules/
+newman/
+
+# OS / エディタ
+.DS_Store
+.vscode/
+.idea/

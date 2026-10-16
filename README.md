@@ -1,68 +1,55 @@
-# CONIME Backend (MVP)
+# conime-backend
 
-Backend for the CONIME iPhone app (Unity). Specification: `CONIME_企画・仕様書_v3.1` chapters 1–3. Supabase (PostgreSQL, Auth, Storage, Realtime, Queues, Edge Functions), TypeScript/Deno and OpenAI behind a provider interface. Contract-first: [`openapi/openapi.yaml`](openapi/openapi.yaml).
+CONIME MVP サーバーサイド **第1段階（設計・基盤構築）** のソースコード一式。
+設計の正は「CONIME MVP サーバーサイド設計書（CONIME-BE-SPEC-001 v1.0）」（以下、本書）で、本リポジトリはその第2章〜第4章を実装したもの。
 
-**Scope:** backend only ([`docs/SCOPE.md`](docs/SCOPE.md)). No Unity UI or iOS build work. Unverified macOS/iPhone items: [`docs/IOS_VALIDATION_CHECKLIST.md`](docs/IOS_VALIDATION_CHECKLIST.md).
+- 基盤：Supabase（PostgreSQL・Auth・Storage・Edge Functions）、東京リージョン
+- Unity アプリが呼ぶのは `/auth/v1/*`（Supabase Auth）と `/functions/v1/api/v1/*`（アプリ API）の2種類だけ
+- アプリ API は 39 本（**実動作 13 本・モック 26 本**）。契約は [openapi/openapi.yaml](openapi/openapi.yaml) が正
+- データベースは **33 テーブル・全テーブル RLS 有効**。業務ルールは DB の制約・権限で担保する
 
-## Quick start (Linux, no Docker)
+## リポジトリ構成（本書 連携01）
+
+```
+conime-backend/
+├─ supabase/
+│  ├─ config.toml        # ローカル環境・Auth 設定
+│  ├─ migrations/        # テーブル・RLS・関数（番号順に適用）
+│  ├─ seed.sql           # 質問セット v1・同意文書（仮）・検証データ
+│  ├─ functions/
+│  │  ├─ api/            # アプリ API（Hono ルーター）
+│  │  ├─ worker/         # 生成ジョブの実行
+│  │  └─ _shared/        # 認証・検証・エラー・AiProvider・モック
+│  └─ tests/             # pgTAP（RLS・制約のテスト）
+├─ openapi/openapi.yaml  # API 仕様（正）
+├─ postman/              # コレクション・環境（local / dev）
+├─ docs/                 # 環境構築手順書・Unity 連携手順書
+└─ .github/workflows/    # CI（型・DB・API テスト、デプロイ）
+```
+
+## はじめかた（local）
+
+詳細は [docs/setup.md](docs/setup.md)。
 
 ```bash
-curl -fsSL https://deno.land/install.sh | sh     # Deno 2
-npm install                                      # tooling: OpenAPI lint, Prism mock, newman
-scripts/db-local.sh reset --seed                 # user-space PostgreSQL :54329 with migrations + test data
-scripts/dev-api.sh                               # API on http://127.0.0.1:8787 (+ storage emulator + worker)
-curl http://127.0.0.1:8787/v1/health
-scripts/test-all.sh                              # everything that runs on Linux
+cp .env.example .env
+supabase start                                   # DB・Auth・Storage・Studio を起動
+supabase db reset                                # マイグレーションと初期データを投入
+supabase functions serve --env-file .env         # API（api / worker）を起動
+supabase test db                                 # RLS・制約のテスト（pgTAP）
+npx newman@6.2.1 run postman/CONIME_Phase1.postman_collection.json \
+  -e postman/local.postman_environment.json      # API テスト（正常系・主要なエラー系）
 ```
 
-Frontend without a backend: `npm run mock` serves the contract on `http://127.0.0.1:4010`. With Docker, use the real Supabase stack instead (`supabase start`; see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)).
+## ドキュメント
 
-## Repository layout
-
-```
-openapi/openapi.yaml            API contract (source for validation, Postman, C# DTOs)
-schemas/                        JSON Schemas: api (generated), ai (AI output schemas)
-supabase/
-  migrations/                   schema, RLS, SQL business logic (app.api_* / app.svc_*), reference data
-  functions/api                 /v1 REST API (Edge Function)
-  functions/worker              queue consumer + maintenance (Edge Function; container-portable)
-  functions/_shared             http, auth, db, ai (OpenAI + mock), storage, domain, worker
-  seed/                         local/staging test data (200 users, 7 guilds, fictional anime master)
-  settings/                     staging/production overrides, cron schedule
-  tests/database                pgTAP (RLS allow/deny, business rules, golden)
-tests/                          unit, integration (HTTP), golden, realtime, load (k6), ai-evaluation, unity-contracts
-postman/                        collection + environments
-unity-contracts/                generated C# DTOs + UnityWebRequest example
-templates/anime-master/         CSV templates for the client's anime data
-scripts/                        local DB, dev server, generators, importers, test runners
-docs/                           see below
-```
-
-## Documentation
-
-| Document | Content |
-|----------|---------|
-| [SCOPE](docs/SCOPE.md) | In/out of scope |
-| [ASSUMPTIONS](docs/ASSUMPTIONS.md) | Every default chosen for missing details (needs client confirmation) |
-| [ARCHITECTURE](docs/ARCHITECTURE.md) / [ER_DIAGRAM](docs/ER_DIAGRAM.md) | Components, security model, data flows, schema |
-| [ERROR_CODES](docs/ERROR_CODES.md) | Stable error codes and client actions |
-| [REALTIME](docs/REALTIME.md) | Channels, envelope, events, reconnect algorithm |
-| [UNITY_IOS_INTEGRATION](docs/UNITY_IOS_INTEGRATION.md) | Sequences and examples for the Unity engineer |
-| [IOS_VALIDATION_CHECKLIST](docs/IOS_VALIDATION_CHECKLIST.md) | External tests on macOS/iPhone (not done by backend) |
-| [TESTING](docs/TESTING.md) / [TEST_REPORT](docs/TEST_REPORT.md) / [LOAD_TEST](docs/LOAD_TEST.md) | How to test; what passed; what is unverified |
-| [DEPLOYMENT](docs/DEPLOYMENT.md) | Local, staging, production checklist, backup/restore |
-| [OPERATIONS](docs/OPERATIONS.md) | Handover: operator SQL actions, monitoring, retention, runbook |
-| [KNOWN_LIMITATIONS](docs/KNOWN_LIMITATIONS.md) | Verification gaps and functional limits |
-
-## Regenerating derived artifacts
-
-```bash
-deno task schemas                                # openapi → JSON Schemas (runtime validation)
-deno run -A scripts/generate-postman.ts          # openapi → Postman collection
-deno run -A scripts/generate-csharp-dtos.ts      # openapi → Unity C# DTOs
-deno task seed                                   # deterministic seed SQL
-```
-
-## Secrets
-
-No secrets are stored in this repository. `.env.example` lists the variables; local values are placeholders for the Linux dev setup only. Staging and production secrets are set with `supabase secrets set` (see `DEPLOYMENT.md`). The client never receives the OpenAI key, the service-role key or database credentials.
+| 資料 | ファイル |
+|---|---|
+| 納品物一覧・検収条件の確認方法 | [docs/README.md](docs/README.md) |
+| 環境構築手順書（local / dev） | [docs/setup.md](docs/setup.md) |
+| Unity 側との連携手順書 | [docs/unity-integration.md](docs/unity-integration.md)（C# 参考実装：[docs/unity/](docs/unity/)） |
+| データベース定義書（全列定義） | [docs/database.md](docs/database.md) |
+| API 仕様書（OpenAPI 3.1） | [openapi/openapi.yaml](openapi/openapi.yaml)（dev 環境では `GET /docs` で閲覧） |
+| Postman コレクション | [postman/](postman/) |
+| 未確定事項・確認依頼（U-01〜U-22） | [docs/open-items.md](docs/open-items.md) |
+| 第2段階への引継ぎ資料 | [docs/phase2-handover.md](docs/phase2-handover.md) |

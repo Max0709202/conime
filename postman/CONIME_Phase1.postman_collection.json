@@ -1,0 +1,3295 @@
+{
+  "info": {
+    "name": "CONIME Phase1 API",
+    "description": "CONIME MVP サーバーサイド第1段階の API 検証コレクション（設計書 連携02）。\n\n上から順に実行すると「登録 → 同意 → 診断送信 → 結果取得」を通しで確認できる。各リクエストには正常・異常を判定するテストと、応答が openapi/openapi.yaml の定義と一致することの検証を付与している。ログイン時のトークンは環境変数へ自動保存する。\n\n環境：local.postman_environment.json / dev.postman_environment.json。CI では `newman run` で同じコレクションを実行する。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// 実行ごとに一意なメールアドレスを作る（何度実行しても同じ結果になる）",
+          "if (!pm.environment.get('email_a') || pm.info.requestName.startsWith('サインアップ（ユーザーA）')) {",
+          "  const runId = Date.now().toString(36);",
+          "  pm.environment.set('email_a', `postman-${runId}-a@conime.test`);",
+          "  pm.environment.set('email_b', `postman-${runId}-b@conime.test`);",
+          "}",
+          "// 質問定義から「すべて有効な回答」を組み立てる（04 Diagnosis で使用）",
+          "const qs = pm.environment.get('questions_json');",
+          "if (qs) {",
+          "  const answers = JSON.parse(qs).map((q) => {",
+          "    const c = q.constraints || {};",
+          "    switch (q.answer_type) {",
+          "      case 'single_choice': return { question_code: q.code, option_codes: [q.options[0].code] };",
+          "      case 'multi_choice': return { question_code: q.code, option_codes: q.options.slice(0, Math.max(1, Math.min(2, c.max_select || 1))).map((o) => o.code) };",
+          "      case 'free_fields': return { question_code: q.code, texts: Array.from({ length: c.field_count || 1 }, (_, i) => `回答${i + 1}`) };",
+          "      default: return { question_code: q.code, texts: ['作品D、作品E'] };",
+          "    }",
+          "  });",
+          "  pm.variables.set('valid_answers', JSON.stringify(answers));",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "00 Health",
+      "description": "活死確認 200",
+      "item": [
+        {
+          "name": "活死確認 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /health 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"status\",\"api_version\",\"mock_mode\",\"time\"],\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"ok\"]},\"api_version\":{\"type\":\"string\"},\"mock_mode\":{\"type\":\"boolean\"},\"time\":{\"type\":\"string\"}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              }
+            ],
+            "url": "{{base_url}}/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "01 Auth",
+      "description": "サインアップ・ログイン・トークン更新・ログアウト。誤パスワード 400、登録済みメール 422、トークンなしで /me 401",
+      "item": [
+        {
+          "name": "サインアップ（ユーザーA）200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json();",
+                  "pm.test(\"アクセストークン・リフレッシュトークンを発行\", () => { pm.expect(s.access_token).to.be.a(\"string\"); pm.expect(s.refresh_token).to.be.a(\"string\"); });",
+                  "pm.environment.set(\"access_token_a\", s.access_token);",
+                  "pm.environment.set(\"refresh_token_a\", s.refresh_token);",
+                  "pm.environment.set(\"user_id_a\", s.user.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email_a}}\",\n  \"password\": \"{{password}}\",\n  \"data\": { \"display_name\": \"Postman A\" }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{auth_url}}/signup"
+          }
+        },
+        {
+          "name": "サインアップ（ユーザーB）200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json();",
+                  "pm.test(\"アクセストークン・リフレッシュトークンを発行\", () => { pm.expect(s.access_token).to.be.a(\"string\"); pm.expect(s.refresh_token).to.be.a(\"string\"); });",
+                  "pm.environment.set(\"access_token_b\", s.access_token);",
+                  "pm.environment.set(\"refresh_token_b\", s.refresh_token);",
+                  "pm.environment.set(\"user_id_b\", s.user.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email_b}}\",\n  \"password\": \"{{password}}\",\n  \"data\": { \"display_name\": \"Postman B\" }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{auth_url}}/signup"
+          }
+        },
+        {
+          "name": "サインアップ（登録済みメール）422",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"error_code = user_already_exists\", () => pm.expect(pm.response.json().error_code).to.eql(\"user_already_exists\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email_a}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{auth_url}}/signup"
+          }
+        },
+        {
+          "name": "ログイン（誤パスワード）400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"error_code = invalid_credentials\", () => pm.expect(pm.response.json().error_code).to.eql(\"invalid_credentials\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email_a}}\",\n  \"password\": \"wrong-password\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{auth_url}}/token?grant_type=password"
+          }
+        },
+        {
+          "name": "ログイン 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json();",
+                  "pm.test(\"トークンを発行\", () => pm.expect(s.access_token).to.be.a(\"string\"));",
+                  "pm.environment.set(\"access_token_a\", s.access_token);",
+                  "pm.environment.set(\"refresh_token_a\", s.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email_a}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{auth_url}}/token?grant_type=password"
+          }
+        },
+        {
+          "name": "トークン更新 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json();",
+                  "pm.test(\"リフレッシュトークンが再発行される（使い捨て）\", () => pm.expect(s.refresh_token).to.not.eql(pm.environment.get(\"refresh_token_a\")));",
+                  "pm.environment.set(\"access_token_a\", s.access_token);",
+                  "pm.environment.set(\"refresh_token_a\", s.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token_a}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{auth_url}}/token?grant_type=refresh_token"
+          }
+        },
+        {
+          "name": "ログイン（ログアウト確認用のセッション）200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json();",
+                  "pm.environment.set(\"logout_access_token\", s.access_token);",
+                  "pm.environment.set(\"logout_refresh_token\", s.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email_b}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{auth_url}}/token?grant_type=password"
+          }
+        },
+        {
+          "name": "ログアウト 204",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 204\", () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{logout_access_token}}"
+              }
+            ],
+            "url": "{{auth_url}}/logout?scope=local"
+          }
+        },
+        {
+          "name": "ログアウト後のトークン更新 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{logout_refresh_token}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{auth_url}}/token?grant_type=refresh_token"
+          }
+        },
+        {
+          "name": "トークンなしで /me 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me 401）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = UNAUTHENTICATED\", () => pm.expect(body.error.code).to.eql(\"UNAUTHENTICATED\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              }
+            ],
+            "url": "{{base_url}}/me"
+          }
+        },
+        {
+          "name": "自分の状態（同意前）200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"user_id\",\"email\",\"display_name\",\"role\",\"status\",\"consents\",\"diagnosis\",\"has_character\",\"next_action\"],\"properties\":{\"user_id\":{\"type\":\"string\"},\"email\":{\"type\":[\"string\",\"null\"]},\"display_name\":{\"type\":[\"string\",\"null\"]},\"role\":{\"type\":\"string\",\"enum\":[\"user\",\"admin\"]},\"status\":{\"type\":\"string\",\"enum\":[\"active\",\"withdrawn\"]},\"consents\":{\"type\":\"object\",\"required\":[\"all_granted\",\"ai_transfer_granted\"],\"properties\":{\"all_granted\":{\"type\":\"boolean\"},\"ai_transfer_granted\":{\"type\":\"boolean\"}}},\"diagnosis\":{\"type\":\"object\",\"required\":[\"status\",\"submission_id\"],\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"not_submitted\",\"received\",\"processing\",\"completed\",\"failed\"]},\"submission_id\":{\"type\":[\"string\",\"null\"]}}},\"has_character\":{\"type\":\"boolean\"},\"next_action\":{\"type\":\"string\",\"enum\":[\"consent_required\",\"diagnosis_required\",\"generating\",\"retry_required\",\"ready\"]}}}}}));",
+                  "pm.test(\"next_action = consent_required\", () => pm.expect(body.data.next_action).to.eql(\"consent_required\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me"
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 Questions",
+      "description": "質問定義 200、ETag 一致で 304",
+      "item": [
+        {
+          "name": "質問定義 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /question-sets/current 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"question_set\",\"questions\"],\"properties\":{\"question_set\":{\"type\":\"object\",\"required\":[\"id\",\"version\",\"published_at\"],\"properties\":{\"id\":{\"type\":\"string\"},\"version\":{\"type\":\"integer\",\"minimum\":1},\"published_at\":{\"type\":\"string\"}}},\"questions\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"id\",\"code\",\"order\",\"title\",\"answer_type\",\"required\",\"constraints\",\"usages\",\"options\"],\"properties\":{\"id\":{\"type\":\"string\"},\"code\":{\"type\":\"string\"},\"order\":{\"type\":\"integer\",\"minimum\":1},\"title\":{\"type\":\"string\"},\"answer_type\":{\"type\":\"string\",\"enum\":[\"single_choice\",\"multi_choice\",\"free_fields\",\"free_multi\"]},\"required\":{\"type\":\"boolean\"},\"constraints\":{\"type\":\"object\",\"properties\":{\"min_select\":{\"type\":\"integer\"},\"max_select\":{\"type\":\"integer\"},\"field_count\":{\"type\":\"integer\"},\"required_field_count\":{\"type\":\"integer\"},\"max_length\":{\"type\":\"integer\"}}},\"usages\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"enum\":[\"character_base\",\"character_adjust\",\"match_score\",\"profile_display\"]}},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"code\",\"label\"],\"properties\":{\"code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}}}}}}}}}}}));",
+                  "pm.test(\"ETag を返す\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.be.a(\"string\"));",
+                  "pm.test(\"20問・出題順\", () => { pm.expect(body.data.questions.length).to.eql(20); pm.expect(body.data.questions.map(q => q.order)).to.eql([...Array(20).keys()].map(i => i + 1)); });",
+                  "pm.environment.set(\"etag\", pm.response.headers.get(\"ETag\"));",
+                  "pm.environment.set(\"question_set_id\", body.data.question_set.id);",
+                  "pm.environment.set(\"question_set_version\", body.data.question_set.version);",
+                  "pm.environment.set(\"questions_json\", JSON.stringify(body.data.questions));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              }
+            ],
+            "url": "{{base_url}}/question-sets/current"
+          }
+        },
+        {
+          "name": "質問定義（ETag 一致）304",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 304\", () => pm.response.to.have.status(304));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "If-None-Match",
+                "value": "{{etag}}"
+              }
+            ],
+            "url": "{{base_url}}/question-sets/current"
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 Consent",
+      "description": "同意文書取得、同意登録 201、同意状況取得。存在しない文書 ID 400",
+      "item": [
+        {
+          "name": "同意文書取得 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /consent-documents/current 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"id\",\"doc_type\",\"version\",\"title\",\"body\",\"requires_reconsent\",\"published_at\"],\"properties\":{\"id\":{\"type\":\"string\"},\"doc_type\":{\"type\":\"string\",\"enum\":[\"terms\",\"privacy\",\"ai_transfer\"]},\"version\":{\"type\":\"integer\",\"minimum\":1},\"title\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"},\"requires_reconsent\":{\"type\":\"boolean\"},\"published_at\":{\"type\":\"string\"}}}}}}));",
+                  "pm.test(\"terms / privacy / ai_transfer\", () => pm.expect(body.data.map(d => d.doc_type)).to.have.members([\"terms\", \"privacy\", \"ai_transfer\"]));",
+                  "body.data.forEach(d => pm.environment.set(\"doc_\" + d.doc_type + \"_id\", d.id));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              }
+            ],
+            "url": "{{base_url}}/consent-documents/current"
+          }
+        },
+        {
+          "name": "同意登録（存在しない文書 ID）400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /me/consents 400）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = VALIDATION_ERROR\", () => pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"consents\": [\n    {\n      \"document_id\": \"00000000-0000-4000-8000-000000000000\",\n      \"decision\": \"granted\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/me/consents"
+          }
+        },
+        {
+          "name": "同意登録（ユーザーA：3種類）201",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /me/consents 201）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"all_granted\",\"ai_transfer_granted\",\"items\"],\"properties\":{\"all_granted\":{\"type\":\"boolean\"},\"ai_transfer_granted\":{\"type\":\"boolean\"},\"items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"doc_type\",\"document_id\",\"version\",\"title\",\"requires_reconsent\",\"status\",\"consent_id\",\"decided_at\"],\"properties\":{\"doc_type\":{\"type\":\"string\",\"enum\":[\"terms\",\"privacy\",\"ai_transfer\"]},\"document_id\":{\"type\":\"string\"},\"version\":{\"type\":\"integer\"},\"title\":{\"type\":\"string\"},\"requires_reconsent\":{\"type\":\"boolean\"},\"status\":{\"type\":\"string\",\"enum\":[\"granted\",\"revoked\",\"not_decided\",\"reconsent_required\"]},\"consent_id\":{\"type\":[\"string\",\"null\"]},\"decided_at\":{\"type\":[\"string\",\"null\"]}}}}}}}}));",
+                  "pm.test(\"AI 送信同意あり\", () => pm.expect(body.data.ai_transfer_granted).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"consents\": [\n    { \"document_id\": \"{{doc_terms_id}}\", \"decision\": \"granted\" },\n    { \"document_id\": \"{{doc_privacy_id}}\", \"decision\": \"granted\" },\n    { \"document_id\": \"{{doc_ai_transfer_id}}\", \"decision\": \"granted\" }\n  ],\n  \"app_version\": \"postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/me/consents"
+          }
+        },
+        {
+          "name": "同意登録（ユーザーB：AI 送信同意なし）201",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /me/consents 201）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"all_granted\",\"ai_transfer_granted\",\"items\"],\"properties\":{\"all_granted\":{\"type\":\"boolean\"},\"ai_transfer_granted\":{\"type\":\"boolean\"},\"items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"doc_type\",\"document_id\",\"version\",\"title\",\"requires_reconsent\",\"status\",\"consent_id\",\"decided_at\"],\"properties\":{\"doc_type\":{\"type\":\"string\",\"enum\":[\"terms\",\"privacy\",\"ai_transfer\"]},\"document_id\":{\"type\":\"string\"},\"version\":{\"type\":\"integer\"},\"title\":{\"type\":\"string\"},\"requires_reconsent\":{\"type\":\"boolean\"},\"status\":{\"type\":\"string\",\"enum\":[\"granted\",\"revoked\",\"not_decided\",\"reconsent_required\"]},\"consent_id\":{\"type\":[\"string\",\"null\"]},\"decided_at\":{\"type\":[\"string\",\"null\"]}}}}}}}}));",
+                  "pm.test(\"AI 送信同意なし\", () => pm.expect(body.data.ai_transfer_granted).to.eql(false));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_b}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"consents\": [\n    { \"document_id\": \"{{doc_terms_id}}\", \"decision\": \"granted\" },\n    { \"document_id\": \"{{doc_privacy_id}}\", \"decision\": \"granted\" }\n  ],\n  \"app_version\": \"postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/me/consents"
+          }
+        },
+        {
+          "name": "同意状況取得 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/consents 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"all_granted\",\"ai_transfer_granted\",\"items\"],\"properties\":{\"all_granted\":{\"type\":\"boolean\"},\"ai_transfer_granted\":{\"type\":\"boolean\"},\"items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"doc_type\",\"document_id\",\"version\",\"title\",\"requires_reconsent\",\"status\",\"consent_id\",\"decided_at\"],\"properties\":{\"doc_type\":{\"type\":\"string\",\"enum\":[\"terms\",\"privacy\",\"ai_transfer\"]},\"document_id\":{\"type\":\"string\"},\"version\":{\"type\":\"integer\"},\"title\":{\"type\":\"string\"},\"requires_reconsent\":{\"type\":\"boolean\"},\"status\":{\"type\":\"string\",\"enum\":[\"granted\",\"revoked\",\"not_decided\",\"reconsent_required\"]},\"consent_id\":{\"type\":[\"string\",\"null\"]},\"decided_at\":{\"type\":[\"string\",\"null\"]}}}}}}}}));",
+                  "pm.test(\"すべて同意済み\", () => pm.expect(body.data.all_granted).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/consents"
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 Diagnosis",
+      "description": "送信 202、同キー再送 202（同一 ID）、状態・結果取得。未同意 403、必須未回答・選択数超過・文字数超過 400、旧版 409、二重送信 409、キー再利用 422",
+      "item": [
+        {
+          "name": "診断送信（未同意）403",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const answers = JSON.parse(pm.variables.get(\"valid_answers\"));",
+                  "",
+                  "pm.variables.set(\"request_body\", JSON.stringify({ question_set_id: pm.environment.get(\"question_set_id\"), question_set_version: Number(pm.environment.get(\"question_set_version\")), answers, answered_at: new Date().toISOString() }, null, 2));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /diagnoses 403）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = CONSENT_REQUIRED\", () => pm.expect(body.error.code).to.eql(\"CONSENT_REQUIRED\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_b}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{request_body}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/diagnoses"
+          }
+        },
+        {
+          "name": "診断送信（必須未回答）400",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const answers = JSON.parse(pm.variables.get(\"valid_answers\"));",
+                  "answers.splice(answers.findIndex(a => a.question_code === \"Q1\"), 1);",
+                  "pm.variables.set(\"request_body\", JSON.stringify({ question_set_id: pm.environment.get(\"question_set_id\"), question_set_version: Number(pm.environment.get(\"question_set_version\")), answers, answered_at: new Date().toISOString() }, null, 2));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /diagnoses 400）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = VALIDATION_ERROR\", () => pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\"));",
+                  "pm.test(\"required_question_missing（Q1）\", () => pm.expect(body.error.details.some(d => d.reason === \"required_question_missing\" && d.question_code === \"Q1\")).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{request_body}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/diagnoses"
+          }
+        },
+        {
+          "name": "診断送信（選択数超過）400",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const answers = JSON.parse(pm.variables.get(\"valid_answers\"));",
+                  "answers.find(a => a.question_code === \"Q9\").option_codes = [\"A\", \"B\", \"C\", \"D\"];",
+                  "pm.variables.set(\"request_body\", JSON.stringify({ question_set_id: pm.environment.get(\"question_set_id\"), question_set_version: Number(pm.environment.get(\"question_set_version\")), answers, answered_at: new Date().toISOString() }, null, 2));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /diagnoses 400）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = VALIDATION_ERROR\", () => pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\"));",
+                  "pm.test(\"max_select\", () => pm.expect(body.error.details.some(d => d.reason === \"max_select\")).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{request_body}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/diagnoses"
+          }
+        },
+        {
+          "name": "診断送信（文字数超過）400",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const answers = JSON.parse(pm.variables.get(\"valid_answers\"));",
+                  "answers.find(a => a.question_code === \"Q2\").texts = [\"あ\".repeat(201)];",
+                  "pm.variables.set(\"request_body\", JSON.stringify({ question_set_id: pm.environment.get(\"question_set_id\"), question_set_version: Number(pm.environment.get(\"question_set_version\")), answers, answered_at: new Date().toISOString() }, null, 2));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /diagnoses 400）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = VALIDATION_ERROR\", () => pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\"));",
+                  "pm.test(\"max_length\", () => pm.expect(body.error.details.some(d => d.reason === \"max_length\" && d.limit === 200)).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{request_body}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/diagnoses"
+          }
+        },
+        {
+          "name": "診断送信（旧版の質問セット）409",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const answers = JSON.parse(pm.variables.get(\"valid_answers\"));",
+                  "",
+                  "pm.variables.set(\"request_body\", JSON.stringify({ question_set_id: pm.environment.get(\"question_set_id\"), question_set_version: Number(pm.environment.get(\"question_set_version\")), answers, answered_at: new Date().toISOString() }, null, 2));",
+                  "const b = JSON.parse(pm.variables.get(\"request_body\")); b.question_set_id = \"00000000-0000-4000-8000-0000000000aa\"; pm.variables.set(\"request_body\", JSON.stringify(b));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 409\", () => pm.response.to.have.status(409));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /diagnoses 409）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = QUESTION_SET_OUTDATED\", () => pm.expect(body.error.code).to.eql(\"QUESTION_SET_OUTDATED\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{request_body}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/diagnoses"
+          }
+        },
+        {
+          "name": "診断送信 202",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set(\"diagnosis_key\", pm.variables.replaceIn(\"{{$guid}}\"));",
+                  "const answers = JSON.parse(pm.variables.get(\"valid_answers\"));",
+                  "",
+                  "pm.variables.set(\"request_body\", JSON.stringify({ question_set_id: pm.environment.get(\"question_set_id\"), question_set_version: Number(pm.environment.get(\"question_set_version\")), answers, answered_at: new Date().toISOString() }, null, 2));",
+                  "pm.environment.set(\"diagnosis_body\", pm.variables.get(\"request_body\"));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 202\", () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /diagnoses 202）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"submission_id\",\"status\",\"submitted_at\",\"poll_after_seconds\"],\"properties\":{\"submission_id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\",\"enum\":[\"received\",\"processing\",\"completed\",\"failed\"]},\"submitted_at\":{\"type\":\"string\"},\"poll_after_seconds\":{\"type\":\"integer\"}}}}}));",
+                  "pm.test(\"received\", () => pm.expect(body.data.status).to.eql(\"received\"));",
+                  "pm.test(\"Location に状態取得 URL\", () => pm.expect(pm.response.headers.get(\"Location\")).to.include(\"/diagnoses/\" + body.data.submission_id));",
+                  "pm.environment.set(\"submission_id\", body.data.submission_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{diagnosis_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{request_body}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/diagnoses"
+          }
+        },
+        {
+          "name": "診断送信（同じキーで再送）202 同一 ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 202\", () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /diagnoses 202）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"submission_id\",\"status\",\"submitted_at\",\"poll_after_seconds\"],\"properties\":{\"submission_id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\",\"enum\":[\"received\",\"processing\",\"completed\",\"failed\"]},\"submitted_at\":{\"type\":\"string\"},\"poll_after_seconds\":{\"type\":\"integer\"}}}}}));",
+                  "pm.test(\"初回と同じ submission_id\", () => pm.expect(body.data.submission_id).to.eql(pm.environment.get(\"submission_id\")));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{diagnosis_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{diagnosis_body}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/diagnoses"
+          }
+        },
+        {
+          "name": "診断送信（同じキーで内容が異なる）422",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const answers = JSON.parse(pm.variables.get(\"valid_answers\"));",
+                  "answers.find(a => a.question_code === \"Q6\").option_codes = [\"D\"];",
+                  "pm.variables.set(\"request_body\", JSON.stringify({ question_set_id: pm.environment.get(\"question_set_id\"), question_set_version: Number(pm.environment.get(\"question_set_version\")), answers, answered_at: new Date().toISOString() }, null, 2));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /diagnoses 422）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = IDEMPOTENCY_KEY_REUSED\", () => pm.expect(body.error.code).to.eql(\"IDEMPOTENCY_KEY_REUSED\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{diagnosis_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{request_body}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/diagnoses"
+          }
+        },
+        {
+          "name": "診断送信（二重送信）409",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const answers = JSON.parse(pm.variables.get(\"valid_answers\"));",
+                  "",
+                  "pm.variables.set(\"request_body\", JSON.stringify({ question_set_id: pm.environment.get(\"question_set_id\"), question_set_version: Number(pm.environment.get(\"question_set_version\")), answers, answered_at: new Date().toISOString() }, null, 2));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 409\", () => pm.response.to.have.status(409));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /diagnoses 409）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = ALREADY_SUBMITTED\", () => pm.expect(body.error.code).to.eql(\"ALREADY_SUBMITTED\"));",
+                  "pm.test(\"details に既存の submission_id\", () => pm.expect(body.error.details[0].submission_id).to.eql(pm.environment.get(\"submission_id\")));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{request_body}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/diagnoses"
+          }
+        },
+        {
+          "name": "生成状態の取得 200（completed まで繰り返し）",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const n = Number(pm.environment.get(\"poll_count\") || 0);",
+                  "if (n > 0) setTimeout(() => {}, 1500); // poll_after_seconds ごとに再取得"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /diagnoses/{submission_id} 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"submission_id\",\"status\",\"submitted_at\",\"completed_at\",\"error_code\",\"poll_after_seconds\",\"retryable\"],\"properties\":{\"submission_id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\",\"enum\":[\"received\",\"processing\",\"completed\",\"failed\"]},\"submitted_at\":{\"type\":\"string\"},\"completed_at\":{\"type\":[\"string\",\"null\"]},\"error_code\":{\"type\":[\"string\",\"null\"]},\"poll_after_seconds\":{\"type\":[\"integer\",\"null\"]},\"retryable\":{\"type\":\"boolean\"}}}}}));",
+                  "const n = Number(pm.environment.get(\"poll_count\") || 0) + 1;",
+                  "if ([\"received\", \"processing\"].includes(body.data.status) && n < 40) {",
+                  "  pm.environment.set(\"poll_count\", n);",
+                  "  pm.test(\"生成待ち（poll_after_seconds あり）\", () => pm.expect(body.data.poll_after_seconds).to.be.a(\"number\"));",
+                  "  postman.setNextRequest(pm.info.requestName);",
+                  "} else {",
+                  "  pm.environment.unset(\"poll_count\");",
+                  "  pm.test(\"completed\", () => pm.expect(body.data.status).to.eql(\"completed\"));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/diagnoses/{{submission_id}}"
+          }
+        },
+        {
+          "name": "診断結果の取得 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/diagnosis-result 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"submission\",\"profile\",\"character\",\"image\",\"recommendations\"],\"properties\":{\"submission\":{\"type\":\"object\",\"required\":[\"submission_id\",\"status\"],\"properties\":{\"submission_id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\",\"enum\":[\"received\",\"processing\",\"completed\",\"failed\"]}}},\"profile\":{\"type\":\"object\",\"required\":[\"status\",\"personality\",\"items\",\"ai_comments\"],\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"pending\",\"ready\",\"failed\"]},\"personality\":{\"type\":[\"string\",\"null\"]},\"items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"key\",\"label\",\"values\"],\"properties\":{\"key\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"ai_comments\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}},\"character\":{\"oneOf\":[{\"type\":\"null\"},{\"type\":\"object\",\"required\":[\"public_code\",\"name\",\"level\",\"species\",\"class\",\"attribute\",\"rarity\",\"title\",\"personality\",\"strengths\",\"weaknesses\",\"skills\",\"extra\"],\"properties\":{\"public_code\":{\"type\":\"string\",\"pattern\":\"^C-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$\"},\"name\":{\"type\":[\"string\",\"null\"]},\"level\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"species\":{\"type\":[\"string\",\"null\"]},\"class\":{\"type\":[\"string\",\"null\"]},\"attribute\":{\"type\":[\"string\",\"null\"]},\"rarity\":{\"type\":[\"string\",\"null\"]},\"title\":{\"type\":[\"string\",\"null\"]},\"personality\":{\"type\":[\"string\",\"null\"]},\"strengths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"weaknesses\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"skills\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"name\",\"description\"],\"properties\":{\"name\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"}}}},\"extra\":{\"type\":\"object\"}}}]},\"image\":{\"type\":\"object\",\"required\":[\"status\",\"url\",\"expires_at\",\"stage\"],\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"none\",\"generating\",\"ready\",\"failed\"]},\"url\":{\"type\":[\"string\",\"null\"]},\"expires_at\":{\"type\":[\"string\",\"null\"]},\"stage\":{\"type\":\"integer\",\"minimum\":0}}},\"recommendations\":{\"type\":\"object\",\"required\":[\"status\",\"works\",\"guilds\",\"users\"],\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"pending\",\"ready\"]},\"works\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"rank\",\"work\",\"matched_items\",\"reason\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"work\":{\"type\":\"object\",\"required\":[\"id\",\"title\"],\"properties\":{\"id\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"reason\":{\"type\":[\"string\",\"null\"]}}}},\"guilds\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"rank\",\"guild\",\"compatibility\",\"matched_items\",\"reason\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"guild\":{\"type\":\"object\",\"required\":[\"id\",\"name\",\"member_count\",\"capacity\",\"tags\"],\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"member_count\":{\"type\":\"integer\"},\"capacity\":{\"type\":\"integer\"},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"code\",\"label\"],\"properties\":{\"code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}}}}}},\"compatibility\":{\"type\":\"object\",\"required\":[\"value\",\"display\"],\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},\"display\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"reason\":{\"type\":[\"string\",\"null\"]}}}},\"users\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"rank\",\"user\",\"compatibility\",\"matched_items\",\"can_start_dm\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"user\":{\"type\":\"object\",\"required\":[\"id\",\"display_name\",\"character\"],\"properties\":{\"id\":{\"type\":\"string\"},\"display_name\":{\"type\":[\"string\",\"null\"]},\"character\":{\"type\":\"object\",\"required\":[\"name\",\"level\",\"thumbnail_url\"],\"properties\":{\"name\":{\"type\":[\"string\",\"null\"]},\"level\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"thumbnail_url\":{\"type\":[\"string\",\"null\"]}}}}},\"compatibility\":{\"type\":\"object\",\"required\":[\"value\",\"display\"],\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},\"display\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"can_start_dm\":{\"type\":\"boolean\"}}}}}}}}}}));",
+                  "pm.test(\"プロフィール ready・キャラ名は初回 null\", () => { pm.expect(body.data.profile.status).to.eql(\"ready\"); pm.expect(body.data.character.name).to.eql(null); });",
+                  "pm.test(\"キャラIDは C- ＋ 8文字\", () => pm.expect(body.data.character.public_code).to.match(/^C-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/diagnosis-result"
+          }
+        },
+        {
+          "name": "再試行（completed のため変更なし）202",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 202\", () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /diagnoses/{submission_id}/retry 202）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"submission_id\",\"status\",\"submitted_at\",\"completed_at\",\"error_code\",\"poll_after_seconds\",\"retryable\"],\"properties\":{\"submission_id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\",\"enum\":[\"received\",\"processing\",\"completed\",\"failed\"]},\"submitted_at\":{\"type\":\"string\"},\"completed_at\":{\"type\":[\"string\",\"null\"]},\"error_code\":{\"type\":[\"string\",\"null\"]},\"poll_after_seconds\":{\"type\":[\"integer\",\"null\"]},\"retryable\":{\"type\":\"boolean\"}}}}}));",
+                  "pm.test(\"completed のまま\", () => pm.expect(body.data.status).to.eql(\"completed\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/diagnoses/{{submission_id}}/retry"
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 Character",
+      "description": "取得・名前変更・画像状態取得。診断前 404、文字数超過 400、キャラID変更の試行が無視される",
+      "item": [
+        {
+          "name": "マイキャラ取得（診断前）404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 404\", () => pm.response.to.have.status(404));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/character 404）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = NOT_FOUND\", () => pm.expect(body.error.code).to.eql(\"NOT_FOUND\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_b}}"
+              }
+            ],
+            "url": "{{base_url}}/me/character"
+          }
+        },
+        {
+          "name": "マイキャラ取得 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/character 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"public_code\",\"name\",\"species\",\"class\",\"attribute\",\"rarity\",\"title\",\"level\",\"max_level\",\"exp_total\",\"goodto_points\",\"personality\",\"strengths\",\"weaknesses\",\"skills\",\"status_items\",\"image\",\"created_at\"],\"properties\":{\"public_code\":{\"type\":\"string\",\"pattern\":\"^C-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$\"},\"name\":{\"type\":[\"string\",\"null\"]},\"species\":{\"type\":[\"string\",\"null\"]},\"class\":{\"type\":[\"string\",\"null\"]},\"attribute\":{\"type\":[\"string\",\"null\"]},\"rarity\":{\"type\":[\"string\",\"null\"]},\"title\":{\"type\":[\"string\",\"null\"]},\"level\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"max_level\":{\"type\":\"integer\"},\"exp_total\":{\"type\":\"integer\",\"minimum\":0},\"goodto_points\":{\"type\":\"integer\",\"minimum\":0},\"personality\":{\"type\":[\"string\",\"null\"]},\"strengths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"weaknesses\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"skills\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"name\",\"description\"],\"properties\":{\"name\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"}}}},\"status_items\":{\"type\":\"object\"},\"image\":{\"type\":\"object\",\"required\":[\"status\",\"url\",\"expires_at\",\"stage\"],\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"none\",\"generating\",\"ready\",\"failed\"]},\"url\":{\"type\":[\"string\",\"null\"]},\"expires_at\":{\"type\":[\"string\",\"null\"]},\"stage\":{\"type\":\"integer\",\"minimum\":0}}},\"created_at\":{\"type\":\"string\"}}}}}));",
+                  "pm.environment.set(\"public_code\", body.data.public_code);",
+                  "pm.test(\"Lv.1\", () => pm.expect(body.data.level).to.eql(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/character"
+          }
+        },
+        {
+          "name": "キャラ名の変更（21文字）400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（PATCH /me/character 400）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = VALIDATION_ERROR\", () => pm.expect(body.error.code).to.eql(\"VALIDATION_ERROR\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"あああああああああああああああああああああ\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/me/character"
+          }
+        },
+        {
+          "name": "キャラ名の変更（キャラID・レベルの変更は無視）200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（PATCH /me/character 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"public_code\",\"name\",\"species\",\"class\",\"attribute\",\"rarity\",\"title\",\"level\",\"max_level\",\"exp_total\",\"goodto_points\",\"personality\",\"strengths\",\"weaknesses\",\"skills\",\"status_items\",\"image\",\"created_at\"],\"properties\":{\"public_code\":{\"type\":\"string\",\"pattern\":\"^C-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$\"},\"name\":{\"type\":[\"string\",\"null\"]},\"species\":{\"type\":[\"string\",\"null\"]},\"class\":{\"type\":[\"string\",\"null\"]},\"attribute\":{\"type\":[\"string\",\"null\"]},\"rarity\":{\"type\":[\"string\",\"null\"]},\"title\":{\"type\":[\"string\",\"null\"]},\"level\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"max_level\":{\"type\":\"integer\"},\"exp_total\":{\"type\":\"integer\",\"minimum\":0},\"goodto_points\":{\"type\":\"integer\",\"minimum\":0},\"personality\":{\"type\":[\"string\",\"null\"]},\"strengths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"weaknesses\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"skills\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"name\",\"description\"],\"properties\":{\"name\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"}}}},\"status_items\":{\"type\":\"object\"},\"image\":{\"type\":\"object\",\"required\":[\"status\",\"url\",\"expires_at\",\"stage\"],\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"none\",\"generating\",\"ready\",\"failed\"]},\"url\":{\"type\":[\"string\",\"null\"]},\"expires_at\":{\"type\":[\"string\",\"null\"]},\"stage\":{\"type\":\"integer\",\"minimum\":0}}},\"created_at\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"名前だけが変わる\", () => pm.expect(body.data.name).to.eql(\"ルミナ\"));",
+                  "pm.test(\"キャラIDは変わらない\", () => pm.expect(body.data.public_code).to.eql(pm.environment.get(\"public_code\")));",
+                  "pm.test(\"レベル・EXP は変わらない\", () => { pm.expect(body.data.level).to.eql(1); pm.expect(body.data.exp_total).to.eql(0); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"ルミナ\",\n  \"public_code\": \"C-AAAAAAAA\",\n  \"level\": 99,\n  \"exp_total\": 99999\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/me/character"
+          }
+        },
+        {
+          "name": "画像状態の取得 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/character/image 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"status\",\"url\",\"expires_at\",\"stage\"],\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"none\",\"generating\",\"ready\",\"failed\"]},\"url\":{\"type\":[\"string\",\"null\"]},\"expires_at\":{\"type\":[\"string\",\"null\"]},\"stage\":{\"type\":\"integer\",\"minimum\":0}}}}}));",
+                  "pm.test(\"ready・署名付き URL\", () => { pm.expect(body.data.status).to.eql(\"ready\"); pm.expect(body.data.url).to.be.a(\"string\"); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/character/image"
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 Mock APIs",
+      "description": "第2段階 API 26本の応答形式（OpenAPI 定義と一致）。X-Mock-Scenario による 409・429・500・503",
+      "item": [
+        {
+          "name": "GET /users/{user_id} 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /users/{user_id} 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"id\",\"display_name\",\"character\",\"profile_items\",\"can_start_dm\"],\"properties\":{\"id\":{\"type\":\"string\"},\"display_name\":{\"type\":[\"string\",\"null\"]},\"character\":{\"type\":[\"object\",\"null\"],\"required\":[\"public_code\",\"name\",\"level\",\"thumbnail_url\"],\"properties\":{\"public_code\":{\"type\":\"string\"},\"name\":{\"type\":[\"string\",\"null\"]},\"level\":{\"type\":\"integer\"},\"species\":{\"type\":[\"string\",\"null\"]},\"class\":{\"type\":[\"string\",\"null\"]},\"attribute\":{\"type\":[\"string\",\"null\"]},\"rarity\":{\"type\":[\"string\",\"null\"]},\"title\":{\"type\":[\"string\",\"null\"]},\"thumbnail_url\":{\"type\":[\"string\",\"null\"]}}},\"profile_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"key\",\"label\",\"values\"],\"properties\":{\"key\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"can_start_dm\":{\"type\":\"boolean\"}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/users/{{mock_user_id}}"
+          }
+        },
+        {
+          "name": "GET /me/recommendations?kind=user 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/recommendations 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"anyOf\":[{\"type\":\"object\",\"required\":[\"rank\",\"user\",\"compatibility\",\"matched_items\",\"can_start_dm\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"user\":{\"type\":\"object\",\"required\":[\"id\",\"display_name\",\"character\"],\"properties\":{\"id\":{\"type\":\"string\"},\"display_name\":{\"type\":[\"string\",\"null\"]},\"character\":{\"type\":\"object\",\"required\":[\"name\",\"level\",\"thumbnail_url\"],\"properties\":{\"name\":{\"type\":[\"string\",\"null\"]},\"level\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"thumbnail_url\":{\"type\":[\"string\",\"null\"]}}}}},\"compatibility\":{\"type\":\"object\",\"required\":[\"value\",\"display\"],\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},\"display\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"can_start_dm\":{\"type\":\"boolean\"}}},{\"type\":\"object\",\"required\":[\"rank\",\"guild\",\"compatibility\",\"matched_items\",\"reason\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"guild\":{\"type\":\"object\",\"required\":[\"id\",\"name\",\"member_count\",\"capacity\",\"tags\"],\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"member_count\":{\"type\":\"integer\"},\"capacity\":{\"type\":\"integer\"},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"code\",\"label\"],\"properties\":{\"code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}}}}}},\"compatibility\":{\"type\":\"object\",\"required\":[\"value\",\"display\"],\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},\"display\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"reason\":{\"type\":[\"string\",\"null\"]}}},{\"type\":\"object\",\"required\":[\"rank\",\"work\",\"matched_items\",\"reason\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"work\":{\"type\":\"object\",\"required\":[\"id\",\"title\"],\"properties\":{\"id\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"reason\":{\"type\":[\"string\",\"null\"]}}}]}},\"meta\":{\"type\":\"object\",\"required\":[\"generated_at\"],\"properties\":{\"generated_at\":{\"type\":[\"string\",\"null\"]}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/recommendations?kind=user"
+          }
+        },
+        {
+          "name": "GET /me/recommendations?kind=guild 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/recommendations 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"anyOf\":[{\"type\":\"object\",\"required\":[\"rank\",\"user\",\"compatibility\",\"matched_items\",\"can_start_dm\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"user\":{\"type\":\"object\",\"required\":[\"id\",\"display_name\",\"character\"],\"properties\":{\"id\":{\"type\":\"string\"},\"display_name\":{\"type\":[\"string\",\"null\"]},\"character\":{\"type\":\"object\",\"required\":[\"name\",\"level\",\"thumbnail_url\"],\"properties\":{\"name\":{\"type\":[\"string\",\"null\"]},\"level\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"thumbnail_url\":{\"type\":[\"string\",\"null\"]}}}}},\"compatibility\":{\"type\":\"object\",\"required\":[\"value\",\"display\"],\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},\"display\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"can_start_dm\":{\"type\":\"boolean\"}}},{\"type\":\"object\",\"required\":[\"rank\",\"guild\",\"compatibility\",\"matched_items\",\"reason\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"guild\":{\"type\":\"object\",\"required\":[\"id\",\"name\",\"member_count\",\"capacity\",\"tags\"],\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"member_count\":{\"type\":\"integer\"},\"capacity\":{\"type\":\"integer\"},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"code\",\"label\"],\"properties\":{\"code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}}}}}},\"compatibility\":{\"type\":\"object\",\"required\":[\"value\",\"display\"],\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},\"display\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"reason\":{\"type\":[\"string\",\"null\"]}}},{\"type\":\"object\",\"required\":[\"rank\",\"work\",\"matched_items\",\"reason\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"work\":{\"type\":\"object\",\"required\":[\"id\",\"title\"],\"properties\":{\"id\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"reason\":{\"type\":[\"string\",\"null\"]}}}]}},\"meta\":{\"type\":\"object\",\"required\":[\"generated_at\"],\"properties\":{\"generated_at\":{\"type\":[\"string\",\"null\"]}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/recommendations?kind=guild"
+          }
+        },
+        {
+          "name": "GET /me/recommendations?kind=work 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/recommendations 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"anyOf\":[{\"type\":\"object\",\"required\":[\"rank\",\"user\",\"compatibility\",\"matched_items\",\"can_start_dm\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"user\":{\"type\":\"object\",\"required\":[\"id\",\"display_name\",\"character\"],\"properties\":{\"id\":{\"type\":\"string\"},\"display_name\":{\"type\":[\"string\",\"null\"]},\"character\":{\"type\":\"object\",\"required\":[\"name\",\"level\",\"thumbnail_url\"],\"properties\":{\"name\":{\"type\":[\"string\",\"null\"]},\"level\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"thumbnail_url\":{\"type\":[\"string\",\"null\"]}}}}},\"compatibility\":{\"type\":\"object\",\"required\":[\"value\",\"display\"],\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},\"display\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"can_start_dm\":{\"type\":\"boolean\"}}},{\"type\":\"object\",\"required\":[\"rank\",\"guild\",\"compatibility\",\"matched_items\",\"reason\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"guild\":{\"type\":\"object\",\"required\":[\"id\",\"name\",\"member_count\",\"capacity\",\"tags\"],\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"member_count\":{\"type\":\"integer\"},\"capacity\":{\"type\":\"integer\"},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"code\",\"label\"],\"properties\":{\"code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}}}}}},\"compatibility\":{\"type\":\"object\",\"required\":[\"value\",\"display\"],\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},\"display\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"reason\":{\"type\":[\"string\",\"null\"]}}},{\"type\":\"object\",\"required\":[\"rank\",\"work\",\"matched_items\",\"reason\"],\"properties\":{\"rank\":{\"type\":\"integer\",\"minimum\":1},\"work\":{\"type\":\"object\",\"required\":[\"id\",\"title\"],\"properties\":{\"id\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"}}},\"matched_items\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"question_code\",\"label\",\"values\"],\"properties\":{\"question_code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"values\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"reason\":{\"type\":[\"string\",\"null\"]}}}]}},\"meta\":{\"type\":\"object\",\"required\":[\"generated_at\"],\"properties\":{\"generated_at\":{\"type\":[\"string\",\"null\"]}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/recommendations?kind=work"
+          }
+        },
+        {
+          "name": "GET /guilds 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /guilds 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"id\",\"name\",\"description\",\"tags\",\"member_count\",\"capacity\",\"is_member\",\"is_full\"],\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"description\":{\"type\":[\"string\",\"null\"]},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"code\",\"label\"],\"properties\":{\"code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}}}},\"member_count\":{\"type\":\"integer\",\"minimum\":0},\"capacity\":{\"type\":\"integer\",\"minimum\":1},\"is_member\":{\"type\":\"boolean\"},\"is_full\":{\"type\":\"boolean\"}}}},\"meta\":{\"type\":\"object\",\"required\":[\"next_cursor\"],\"properties\":{\"next_cursor\":{\"type\":[\"string\",\"null\"]}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/guilds?q=ファンタジー&limit=20"
+          }
+        },
+        {
+          "name": "GET /me/guilds 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/guilds 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"id\",\"name\",\"description\",\"tags\",\"member_count\",\"capacity\",\"is_member\",\"is_full\"],\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"description\":{\"type\":[\"string\",\"null\"]},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"code\",\"label\"],\"properties\":{\"code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}}}},\"member_count\":{\"type\":\"integer\",\"minimum\":0},\"capacity\":{\"type\":\"integer\",\"minimum\":1},\"is_member\":{\"type\":\"boolean\"},\"is_full\":{\"type\":\"boolean\"}}}},\"meta\":{\"type\":\"object\",\"required\":[\"next_cursor\"],\"properties\":{\"next_cursor\":{\"type\":[\"string\",\"null\"]}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/guilds"
+          }
+        },
+        {
+          "name": "GET /guilds/{guild_id} 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /guilds/{guild_id} 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"allOf\":[{\"type\":\"object\",\"required\":[\"id\",\"name\",\"description\",\"tags\",\"member_count\",\"capacity\",\"is_member\",\"is_full\"],\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"description\":{\"type\":[\"string\",\"null\"]},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"code\",\"label\"],\"properties\":{\"code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}}}},\"member_count\":{\"type\":\"integer\",\"minimum\":0},\"capacity\":{\"type\":\"integer\",\"minimum\":1},\"is_member\":{\"type\":\"boolean\"},\"is_full\":{\"type\":\"boolean\"}}},{\"type\":\"object\",\"required\":[\"leader_info\",\"conversation_id\",\"my_role\",\"joined_at\"],\"properties\":{\"leader_info\":{\"type\":[\"string\",\"null\"]},\"conversation_id\":{\"type\":\"string\"},\"my_role\":{\"type\":[\"string\",\"null\"],\"enum\":[\"member\",\"leader\",\"staff\",null]},\"joined_at\":{\"type\":[\"string\",\"null\"]}}}]}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/guilds/{{mock_guild_id}}"
+          }
+        },
+        {
+          "name": "POST /guilds/{guild_id}/join 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /guilds/{guild_id}/join 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"guild_id\",\"conversation_id\",\"member_count\",\"capacity\"],\"properties\":{\"guild_id\":{\"type\":\"string\"},\"conversation_id\":{\"type\":\"string\"},\"member_count\":{\"type\":\"integer\"},\"capacity\":{\"type\":\"integer\"}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/guilds/{{mock_guild_id}}/join"
+          }
+        },
+        {
+          "name": "GET /guilds/{guild_id}/announcements 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /guilds/{guild_id}/announcements 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"id\",\"title\",\"body\",\"published_at\"],\"properties\":{\"id\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"},\"published_at\":{\"type\":\"string\"}}}},\"meta\":{\"type\":\"object\",\"required\":[\"next_cursor\"],\"properties\":{\"next_cursor\":{\"type\":[\"string\",\"null\"]}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/guilds/{{mock_guild_id}}/announcements"
+          }
+        },
+        {
+          "name": "GET /guilds/{guild_id}/members 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /guilds/{guild_id}/members 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"user_id\",\"display_name\",\"role\",\"character\",\"joined_at\"],\"properties\":{\"user_id\":{\"type\":\"string\"},\"display_name\":{\"type\":[\"string\",\"null\"]},\"role\":{\"type\":\"string\",\"enum\":[\"member\",\"leader\",\"staff\"]},\"character\":{\"type\":\"object\",\"required\":[\"name\",\"level\",\"thumbnail_url\"],\"properties\":{\"name\":{\"type\":[\"string\",\"null\"]},\"level\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"thumbnail_url\":{\"type\":[\"string\",\"null\"]}}},\"joined_at\":{\"type\":\"string\"}}}},\"meta\":{\"type\":\"object\",\"required\":[\"next_cursor\"],\"properties\":{\"next_cursor\":{\"type\":[\"string\",\"null\"]}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/guilds/{{mock_guild_id}}/members"
+          }
+        },
+        {
+          "name": "GET /conversations?kind=dm 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /conversations 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"conversation_id\",\"partner\",\"last_message\",\"has_unread\",\"unread_count\"],\"properties\":{\"conversation_id\":{\"type\":\"string\"},\"partner\":{\"type\":\"object\",\"required\":[\"user_id\",\"display_name\",\"character\"],\"properties\":{\"user_id\":{\"type\":\"string\"},\"display_name\":{\"type\":[\"string\",\"null\"]},\"character\":{\"type\":\"object\",\"required\":[\"name\",\"level\",\"thumbnail_url\"],\"properties\":{\"name\":{\"type\":[\"string\",\"null\"]},\"level\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"thumbnail_url\":{\"type\":[\"string\",\"null\"]}}}}},\"last_message\":{\"type\":[\"object\",\"null\"],\"required\":[\"body\",\"created_at\"],\"properties\":{\"body\":{\"type\":[\"string\",\"null\"]},\"created_at\":{\"type\":\"string\"}}},\"has_unread\":{\"type\":\"boolean\"},\"unread_count\":{\"type\":\"integer\",\"minimum\":0}}}},\"meta\":{\"type\":\"object\",\"required\":[\"next_cursor\"],\"properties\":{\"next_cursor\":{\"type\":[\"string\",\"null\"]}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/conversations?kind=dm"
+          }
+        },
+        {
+          "name": "POST /conversations/dm 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /conversations/dm 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"conversation_id\",\"created\"],\"properties\":{\"conversation_id\":{\"type\":\"string\"},\"created\":{\"type\":\"boolean\"}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"b7e2c3d4-1111-4a2b-9c3d-000000000101\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/conversations/dm"
+          }
+        },
+        {
+          "name": "GET /conversations/{conversation_id}/messages 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /conversations/{conversation_id}/messages 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"id\",\"conversation_id\",\"sender\",\"body\",\"image_url\",\"created_at\",\"goodto\"],\"properties\":{\"id\":{\"type\":\"string\"},\"conversation_id\":{\"type\":\"string\"},\"sender\":{\"type\":\"object\",\"required\":[\"type\",\"user_id\",\"display_name\",\"role\",\"character_thumbnail_url\"],\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"user\",\"navigator\",\"system\"]},\"user_id\":{\"type\":[\"string\",\"null\"]},\"display_name\":{\"type\":\"string\"},\"role\":{\"type\":[\"string\",\"null\"],\"enum\":[\"member\",\"leader\",\"staff\",null]},\"character_thumbnail_url\":{\"type\":[\"string\",\"null\"]}}},\"body\":{\"type\":[\"string\",\"null\"]},\"image_url\":{\"type\":[\"string\",\"null\"]},\"created_at\":{\"type\":\"string\"},\"goodto\":{\"type\":\"object\",\"required\":[\"total_count\",\"granted_by_me\"],\"properties\":{\"total_count\":{\"type\":\"integer\",\"minimum\":0},\"granted_by_me\":{\"type\":\"boolean\"}}}}}},\"meta\":{\"type\":\"object\",\"required\":[\"next_cursor\"],\"properties\":{\"next_cursor\":{\"type\":[\"string\",\"null\"]}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/conversations/{{mock_conversation_id}}/messages?limit=20"
+          }
+        },
+        {
+          "name": "POST /conversations/{conversation_id}/messages 201",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /conversations/{conversation_id}/messages 201）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"id\",\"conversation_id\",\"sender\",\"body\",\"image_url\",\"created_at\",\"goodto\"],\"properties\":{\"id\":{\"type\":\"string\"},\"conversation_id\":{\"type\":\"string\"},\"sender\":{\"type\":\"object\",\"required\":[\"type\",\"user_id\",\"display_name\",\"role\",\"character_thumbnail_url\"],\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"user\",\"navigator\",\"system\"]},\"user_id\":{\"type\":[\"string\",\"null\"]},\"display_name\":{\"type\":\"string\"},\"role\":{\"type\":[\"string\",\"null\"],\"enum\":[\"member\",\"leader\",\"staff\",null]},\"character_thumbnail_url\":{\"type\":[\"string\",\"null\"]}}},\"body\":{\"type\":[\"string\",\"null\"]},\"image_url\":{\"type\":[\"string\",\"null\"]},\"created_at\":{\"type\":\"string\"},\"goodto\":{\"type\":\"object\",\"required\":[\"total_count\",\"granted_by_me\"],\"properties\":{\"total_count\":{\"type\":\"integer\",\"minimum\":0},\"granted_by_me\":{\"type\":\"boolean\"}}}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"body\": \"こんにちは！\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/conversations/{{mock_conversation_id}}/messages"
+          }
+        },
+        {
+          "name": "POST /conversations/{conversation_id}/read 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /conversations/{conversation_id}/read 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"conversation_id\",\"last_read_at\",\"unread_count\"],\"properties\":{\"conversation_id\":{\"type\":\"string\"},\"last_read_at\":{\"type\":\"string\"},\"unread_count\":{\"type\":\"integer\",\"minimum\":0}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/conversations/{{mock_conversation_id}}/read"
+          }
+        },
+        {
+          "name": "POST /uploads/message-images 201",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /uploads/message-images 201）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"upload_url\",\"image_path\",\"expires_at\",\"max_bytes\"],\"properties\":{\"upload_url\":{\"type\":\"string\"},\"image_path\":{\"type\":\"string\"},\"expires_at\":{\"type\":\"string\"},\"max_bytes\":{\"type\":\"integer\"}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content_type\": \"image/jpeg\",\n  \"size_bytes\": 345678\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/uploads/message-images"
+          }
+        },
+        {
+          "name": "POST /goodtos 201",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /goodtos 201）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"target\",\"total_count\",\"granted\"],\"properties\":{\"target\":{\"type\":\"object\",\"required\":[\"type\",\"id\"],\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"message\"]},\"id\":{\"type\":\"string\"}}},\"total_count\":{\"type\":\"integer\",\"minimum\":0},\"granted\":{\"type\":\"boolean\"}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"target_type\": \"message\",\n  \"target_id\": \"9a40e1f2-3333-4c5d-8e6f-000000000201\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/goodtos"
+          }
+        },
+        {
+          "name": "GET /me/goodtos/received 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/goodtos/received 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"id\",\"giver\",\"target\",\"points\",\"created_at\"],\"properties\":{\"id\":{\"type\":\"string\"},\"giver\":{\"type\":\"object\",\"required\":[\"user_id\",\"display_name\"],\"properties\":{\"user_id\":{\"type\":[\"string\",\"null\"]},\"display_name\":{\"type\":[\"string\",\"null\"]}}},\"target\":{\"type\":\"object\",\"required\":[\"type\",\"id\"],\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"message\"]},\"id\":{\"type\":\"string\"}}},\"points\":{\"type\":\"integer\"},\"created_at\":{\"type\":\"string\"}}}},\"meta\":{\"type\":\"object\",\"required\":[\"next_cursor\",\"total_count\"],\"properties\":{\"next_cursor\":{\"type\":[\"string\",\"null\"]},\"total_count\":{\"type\":\"integer\",\"minimum\":0}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/goodtos/received"
+          }
+        },
+        {
+          "name": "GET /me/growth 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/growth 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"level\",\"max_level\",\"exp_total\",\"exp_current_level_start\",\"exp_next_level\",\"goodto_points\",\"next_evolution_level\",\"image\"],\"properties\":{\"level\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"max_level\":{\"type\":\"integer\"},\"exp_total\":{\"type\":\"integer\",\"minimum\":0},\"exp_current_level_start\":{\"type\":\"integer\",\"minimum\":0},\"exp_next_level\":{\"type\":[\"integer\",\"null\"]},\"goodto_points\":{\"type\":\"integer\",\"minimum\":0},\"next_evolution_level\":{\"type\":[\"integer\",\"null\"]},\"image\":{\"type\":\"object\",\"required\":[\"status\",\"url\",\"expires_at\",\"stage\"],\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"none\",\"generating\",\"ready\",\"failed\"]},\"url\":{\"type\":[\"string\",\"null\"]},\"expires_at\":{\"type\":[\"string\",\"null\"]},\"stage\":{\"type\":\"integer\",\"minimum\":0}}}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/growth"
+          }
+        },
+        {
+          "name": "GET /navigator/messages 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /navigator/messages 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"id\",\"role\",\"body\",\"created_at\"],\"properties\":{\"id\":{\"type\":\"string\"},\"role\":{\"type\":\"string\",\"enum\":[\"user\",\"navigator\"]},\"body\":{\"type\":\"string\"},\"created_at\":{\"type\":\"string\"}}}},\"meta\":{\"type\":\"object\",\"required\":[\"next_cursor\",\"remaining_today\",\"daily_limit\"],\"properties\":{\"next_cursor\":{\"type\":[\"string\",\"null\"]},\"remaining_today\":{\"type\":\"integer\",\"minimum\":0},\"daily_limit\":{\"type\":\"integer\",\"minimum\":0}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/navigator/messages"
+          }
+        },
+        {
+          "name": "POST /navigator/messages 201",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /navigator/messages 201）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"question\",\"reply\",\"remaining_today\"],\"properties\":{\"question\":{\"type\":\"object\",\"required\":[\"id\",\"role\",\"body\",\"created_at\"],\"properties\":{\"id\":{\"type\":\"string\"},\"role\":{\"type\":\"string\",\"enum\":[\"user\",\"navigator\"]},\"body\":{\"type\":\"string\"},\"created_at\":{\"type\":\"string\"}}},\"reply\":{\"type\":\"object\",\"required\":[\"id\",\"role\",\"body\",\"created_at\"],\"properties\":{\"id\":{\"type\":\"string\"},\"role\":{\"type\":\"string\",\"enum\":[\"user\",\"navigator\"]},\"body\":{\"type\":\"string\"},\"created_at\":{\"type\":\"string\"}}},\"remaining_today\":{\"type\":\"integer\",\"minimum\":0}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"body\": \"ギルドに入るにはどうすればいい？\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/navigator/messages"
+          }
+        },
+        {
+          "name": "GET /me/notifications 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/notifications 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"id\",\"type\",\"title\",\"body\",\"link\",\"created_at\",\"read_at\"],\"properties\":{\"id\":{\"type\":\"string\"},\"type\":{\"type\":\"string\",\"enum\":[\"goodto_received\",\"level_up\",\"guild_announcement\",\"dm_received\",\"system\"]},\"title\":{\"type\":\"string\"},\"body\":{\"type\":[\"string\",\"null\"]},\"link\":{\"type\":[\"string\",\"null\"]},\"created_at\":{\"type\":\"string\"},\"read_at\":{\"type\":[\"string\",\"null\"]}}}},\"meta\":{\"type\":\"object\",\"required\":[\"next_cursor\",\"unread_count\"],\"properties\":{\"next_cursor\":{\"type\":[\"string\",\"null\"]},\"unread_count\":{\"type\":\"integer\",\"minimum\":0}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/notifications"
+          }
+        },
+        {
+          "name": "POST /me/notifications/read 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /me/notifications/read 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"updated_count\",\"unread_count\"],\"properties\":{\"updated_count\":{\"type\":\"integer\",\"minimum\":0},\"unread_count\":{\"type\":\"integer\",\"minimum\":0}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"notification_ids\": [\n    \"70710000-0000-4000-8000-000000000001\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/me/notifications/read"
+          }
+        },
+        {
+          "name": "POST /reports 201",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /reports 201）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"report_id\",\"status\",\"created_at\"],\"properties\":{\"report_id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\",\"enum\":[\"open\"]},\"created_at\":{\"type\":\"string\"}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"target_type\": \"message\",\n  \"target_id\": \"9a40e1f2-3333-4c5d-8e6f-000000000201\",\n  \"reason_code\": \"harassment\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/reports"
+          }
+        },
+        {
+          "name": "GET /me/blocks 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/blocks 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"user_id\",\"display_name\",\"created_at\"],\"properties\":{\"user_id\":{\"type\":\"string\"},\"display_name\":{\"type\":[\"string\",\"null\"]},\"created_at\":{\"type\":\"string\"}}}},\"meta\":{\"type\":\"object\",\"required\":[\"next_cursor\"],\"properties\":{\"next_cursor\":{\"type\":[\"string\",\"null\"]}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/me/blocks"
+          }
+        },
+        {
+          "name": "POST /blocks 201",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /blocks 201）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"user_id\",\"display_name\",\"created_at\"],\"properties\":{\"user_id\":{\"type\":\"string\"},\"display_name\":{\"type\":[\"string\",\"null\"]},\"created_at\":{\"type\":\"string\"}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"b7e2c3d4-1111-4a2b-9c3d-000000000102\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/blocks"
+          }
+        },
+        {
+          "name": "DELETE /blocks/{user_id} 204",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 204\", () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              }
+            ],
+            "url": "{{base_url}}/blocks/b7e2c3d4-1111-4a2b-9c3d-000000000102"
+          }
+        },
+        {
+          "name": "POST /me/withdrawal 202",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 202\", () => pm.response.to.have.status(202));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /me/withdrawal 202）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"status\",\"requested_at\",\"purge_scheduled_at\"],\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"requested\"]},\"requested_at\":{\"type\":\"string\"},\"purge_scheduled_at\":{\"type\":\"string\"}}}}}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Postman による応答形式の確認（モックのため退会しない）\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/me/withdrawal"
+          }
+        },
+        {
+          "name": "X-Mock-Scenario: guild_full → 409 GUILD_FULL",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 409\", () => pm.response.to.have.status(409));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /guilds/{guild_id}/join 409）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = GUILD_FULL\", () => pm.expect(body.error.code).to.eql(\"GUILD_FULL\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "X-Mock-Scenario",
+                "value": "guild_full"
+              }
+            ],
+            "url": "{{base_url}}/guilds/{{mock_guild_id}}/join"
+          }
+        },
+        {
+          "name": "X-Mock-Scenario: duplicate_goodto → 409 DUPLICATE_GOODTO",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 409\", () => pm.response.to.have.status(409));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /goodtos 409）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = DUPLICATE_GOODTO\", () => pm.expect(body.error.code).to.eql(\"DUPLICATE_GOODTO\"));",
+                  "pm.test(\"付与済みでも累計を返す\", () => pm.expect(body.error.details[0].total_count).to.be.a(\"number\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "X-Mock-Scenario",
+                "value": "duplicate_goodto"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"target_type\": \"message\",\n  \"target_id\": \"9a40e1f2-3333-4c5d-8e6f-000000000201\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/goodtos"
+          }
+        },
+        {
+          "name": "X-Mock-Scenario: rate_limited → 429 RATE_LIMITED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 429\", () => pm.response.to.have.status(429));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/notifications 429）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = RATE_LIMITED\", () => pm.expect(body.error.code).to.eql(\"RATE_LIMITED\"));",
+                  "pm.test(\"Retry-After: 10\", () => pm.expect(pm.response.headers.get(\"Retry-After\")).to.eql(\"10\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "X-Mock-Scenario",
+                "value": "rate_limited"
+              }
+            ],
+            "url": "{{base_url}}/me/notifications"
+          }
+        },
+        {
+          "name": "X-Mock-Scenario: server_error → 500 INTERNAL_ERROR",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 500\", () => pm.response.to.have.status(500));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /guilds 500）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = INTERNAL_ERROR\", () => pm.expect(body.error.code).to.eql(\"INTERNAL_ERROR\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "X-Mock-Scenario",
+                "value": "server_error"
+              }
+            ],
+            "url": "{{base_url}}/guilds"
+          }
+        },
+        {
+          "name": "X-Mock-Scenario: ai_unavailable → 503 AI_UNAVAILABLE",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 503\", () => pm.response.to.have.status(503));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（POST /navigator/messages 503）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = AI_UNAVAILABLE\", () => pm.expect(body.error.code).to.eql(\"AI_UNAVAILABLE\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "X-Mock-Scenario",
+                "value": "ai_unavailable"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"body\": \"こんにちは\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{base_url}}/navigator/messages"
+          }
+        },
+        {
+          "name": "X-Mock-Scenario: token_expired → 401 TOKEN_EXPIRED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me 401）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = TOKEN_EXPIRED\", () => pm.expect(body.error.code).to.eql(\"TOKEN_EXPIRED\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "X-Mock-Scenario",
+                "value": "token_expired"
+              }
+            ],
+            "url": "{{base_url}}/me"
+          }
+        },
+        {
+          "name": "X-Mock-Scenario: empty → 一覧0件",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /guilds 200）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"data\",\"meta\"],\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"id\",\"name\",\"description\",\"tags\",\"member_count\",\"capacity\",\"is_member\",\"is_full\"],\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"description\":{\"type\":[\"string\",\"null\"]},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"required\":[\"code\",\"label\"],\"properties\":{\"code\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}}}},\"member_count\":{\"type\":\"integer\",\"minimum\":0},\"capacity\":{\"type\":\"integer\",\"minimum\":1},\"is_member\":{\"type\":\"boolean\"},\"is_full\":{\"type\":\"boolean\"}}}},\"meta\":{\"type\":\"object\",\"required\":[\"next_cursor\"],\"properties\":{\"next_cursor\":{\"type\":[\"string\",\"null\"]}}}}}));",
+                  "pm.test(\"0件\", () => pm.expect(body.data).to.have.length(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_a}}"
+              },
+              {
+                "key": "X-Mock-Scenario",
+                "value": "empty"
+              }
+            ],
+            "url": "{{base_url}}/guilds"
+          }
+        }
+      ]
+    },
+    {
+      "name": "07 Security",
+      "description": "他人の submission_id 参照 404、anon key のみで会員 API 401",
+      "item": [
+        {
+          "name": "他人の submission_id を参照 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 404\", () => pm.response.to.have.status(404));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /diagnoses/{submission_id} 404）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = NOT_FOUND\", () => pm.expect(body.error.code).to.eql(\"NOT_FOUND\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token_b}}"
+              }
+            ],
+            "url": "{{base_url}}/diagnoses/{{submission_id}}"
+          }
+        },
+        {
+          "name": "anon key のみ（Authorization なし）で会員 API 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me/character 401）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = UNAUTHENTICATED\", () => pm.expect(body.error.code).to.eql(\"UNAUTHENTICATED\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              }
+            ],
+            "url": "{{base_url}}/me/character"
+          }
+        },
+        {
+          "name": "anon key を Bearer に指定して会員 API 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me 401）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = UNAUTHENTICATED\", () => pm.expect(body.error.code).to.eql(\"UNAUTHENTICATED\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{anon_key}}"
+              }
+            ],
+            "url": "{{base_url}}/me"
+          }
+        },
+        {
+          "name": "改ざんしたトークンで会員 API 401",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const t = pm.environment.get(\"access_token_a\").split(\".\"); t[2] = t[2].split(\"\").reverse().join(\"\"); pm.variables.set(\"tampered_token\", t.join(\".\"));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /me 401）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = UNAUTHENTICATED\", () => pm.expect(body.error.code).to.eql(\"UNAUTHENTICATED\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{anon_key}}"
+              },
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tampered_token}}"
+              }
+            ],
+            "url": "{{base_url}}/me"
+          }
+        },
+        {
+          "name": "apikey なし 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"応答が OpenAPI 定義（GET /health 401）と一致\", () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"error\"],\"properties\":{\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"details\",\"request_id\"],\"properties\":{\"code\":{\"type\":\"string\",\"enum\":[\"VALIDATION_ERROR\",\"UNAUTHENTICATED\",\"TOKEN_EXPIRED\",\"CONSENT_REQUIRED\",\"FORBIDDEN\",\"ACCOUNT_WITHDRAWN\",\"NOT_FOUND\",\"ALREADY_SUBMITTED\",\"QUESTION_SET_OUTDATED\",\"DUPLICATE_GOODTO\",\"GUILD_FULL\",\"GUILD_LIMIT_REACHED\",\"ALREADY_MEMBER\",\"GENERATION_IN_PROGRESS\",\"IDEMPOTENCY_KEY_REUSED\",\"RATE_LIMITED\",\"INTERNAL_ERROR\",\"AI_UNAVAILABLE\"]},\"message\":{\"type\":\"string\"},\"details\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}},\"request_id\":{\"type\":\"string\"}}}}}));",
+                  "pm.test(\"error.code = UNAUTHENTICATED\", () => pm.expect(body.error.code).to.eql(\"UNAUTHENTICATED\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Version",
+                "value": "{{client_version}}"
+              }
+            ],
+            "url": "{{base_url}}/health"
+          }
+        }
+      ]
+    }
+  ]
+}

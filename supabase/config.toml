@@ -1,12 +1,12 @@
-# Supabase CLI configuration (local stack via Docker: `supabase start`).
-# Staging/production settings are configured in the Supabase dashboard / CLI; see docs/DEPLOYMENT.md.
-project_id = "conime"
+# Supabase CLI 設定（local 環境）。dev / prod の設定は Supabase ダッシュボードで行う。
+# 設計書 連携01「supabase start 一つで DB・認証・API・初期データがそろう」
+project_id = "conime-backend"
 
 [api]
 enabled = true
 port = 54321
-# The application schema "app" is intentionally NOT exposed through the Data API.
-# Clients use the /v1 Edge Function only.
+# アプリは PostgREST を使わない（設計書 基盤02 設計方針1）。public は Studio 確認用に公開するが、
+# 書き込み関数は非公開の private スキーマに置くため PostgREST からは呼べない
 schemas = ["public", "graphql_public"]
 extra_search_path = ["public", "extensions"]
 max_rows = 1000
@@ -18,9 +18,10 @@ major_version = 17
 
 [db.seed]
 enabled = true
-sql_paths = ["./seed/*.sql"]
+sql_paths = ["./seed.sql"]
 
 [realtime]
+# トークルーム・DM の新着配信は第2段階
 enabled = true
 
 [studio]
@@ -33,47 +34,45 @@ port = 54324
 
 [storage]
 enabled = true
-file_size_limit = "10MiB"
+file_size_limit = "5MiB"
 
 [auth]
 enabled = true
 site_url = "http://127.0.0.1:3000"
 additional_redirect_urls = ["conime://auth-callback"]
+# アクセストークン有効期限1時間（設計書 認証01）
 jwt_expiry = 3600
+# リフレッシュトークンは使い捨て・更新時に再発行
 enable_refresh_token_rotation = true
 refresh_token_reuse_interval = 10
 enable_signup = true
 enable_anonymous_sign_ins = false
+# パスワード8文字以上
+minimum_password_length = 8
 
 [auth.email]
 enable_signup = true
 double_confirm_changes = true
+# local / dev はメール確認を無効（本番での有効化は U-02）
 enable_confirmations = false
 
-# Native sign-in from the iPhone app (signInWithIdToken). Credentials come from env.
+# Sign in with Apple は要望があれば追加（U-02）
 [auth.external.apple]
 enabled = false
 client_id = "env(SUPABASE_AUTH_EXTERNAL_APPLE_CLIENT_ID)"
 secret = "env(SUPABASE_AUTH_EXTERNAL_APPLE_SECRET)"
-
-[auth.external.google]
-enabled = false
-client_id = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)"
-secret = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET)"
-skip_nonce_check = false
 
 [edge_runtime]
 enabled = true
 policy = "per_worker"
 deno_version = 2
 
-# The API verifies JWTs itself (JWKS for asymmetric keys, or the legacy secret) and
-# serves public endpoints (question set, app config, health).
+# アプリ API。401 TOKEN_EXPIRED / UNAUTHENTICATED を区別して返すため JWT は関数内で検証する。
+# GET /docs 用に openapi.yaml を同梱する
 [functions.api]
 verify_jwt = false
-import_map = "./functions/import_map.json"
+static_files = ["../openapi/openapi.yaml"]
 
-# Protected by the WORKER_SECRET header; invoked by pg_cron/pg_net and the api function.
+# 生成ジョブの実行。WORKER_SECRET ヘッダーで保護（api と pg_cron から呼ばれる）
 [functions.worker]
 verify_jwt = false
-import_map = "./functions/import_map.json"
