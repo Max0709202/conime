@@ -38,7 +38,7 @@ supabase functions serve --env-file .env   # (4) API（api / worker）を起動�
 | service_role key | Edge Functions 内部のみ。アプリ・Postman には使わない |
 | Studio URL（`http://127.0.0.1:54323`） | テーブル・データの確認、運営作業（質問セット・同意文書・ギルドの登録） |
 
-`.env` の `JWT_SECRET` は Supabase CLI の local 既定値。`supabase status` の JWT secret と異なる場合はその値に合わせる。
+アクセストークンの署名は Supabase CLI 2.x の local 既定では ES256（非対称鍵）で、API は JWKS で自動的に検証する。`.env` の `JWT_SECRET` は HS256 で署名するプロジェクト用（local の値は CLI の既定値のままでよい）。
 
 ### 2.2 テスト
 
@@ -82,7 +82,7 @@ openapi.yaml の応答例を返す。Unity エディタの `ApiBaseUrl` を `htt
 1. 貴社名義の Supabase 組織に、dev 用プロジェクトを **東京（ap-northeast-1）** で作成する（U-19：有料プランを推奨。無料プランは一定期間アクセスがないと一時停止される）
 2. Authentication → Providers → Email：Email 有効、**Confirm email を無効**（dev は検証効率のため。本番での有効化は U-02）、パスワード8文字以上
 3. Authentication → Sessions：JWT expiry 3600 秒、Refresh token rotation 有効
-4. Project Settings → API で、Project URL・anon key・JWT Secret を控える（JWT Signing Keys の非対称鍵に移行済みのプロジェクトでは JWT Secret は不要）
+4. Project Settings → API で、Project URL・anon key を控える。アクセストークンを HS256（従来の JWT Secret）で署名しているプロジェクトでは JWT Secret も控える（JWT Signing Keys の非対称鍵なら不要。API が JWKS で検証する）
 
 ### 3.2 初回反映（手元から）
 
@@ -94,7 +94,7 @@ psql "<dev の接続文字列>" -f supabase/seed.sql     # 質問セット v1・
 
 # Edge Functions の Secrets（.env.example の項目。SUPABASE_* は自動で設定される）
 supabase secrets set MOCK_MODE=true MOCK_GENERATION_DELAY_SECONDS=5 RATE_LIMIT_PER_MINUTE=60 \
-  JWT_SECRET=<dev の JWT Secret> WORKER_SECRET=<十分に長いランダム文字列>
+  JWT_SECRET=<dev の JWT Secret（HS256 の場合のみ）> WORKER_SECRET=<十分に長いランダム文字列>
 supabase functions deploy api --no-verify-jwt
 supabase functions deploy worker --no-verify-jwt
 ```
@@ -155,7 +155,8 @@ dev 環境で次が完了することを確認する。Postman コレクショ�
 
 | 症状 | 確認 |
 |---|---|
-| 会員 API がすべて 401 UNAUTHENTICATED | `JWT_SECRET` がプロジェクトの JWT Secret と一致しているか（非対称鍵のプロジェクトは空にする） |
+| 会員 API がすべて 401 UNAUTHENTICATED | HS256 のプロジェクトは `JWT_SECRET` が JWT Secret と一致しているか。非対称鍵（ES256 等）のプロジェクトは Edge Function から `/auth/v1/.well-known/jwks.json` に到達できるか |
 | 診断が received のまま進まない | `WORKER_SECRET` が api / worker で同じか、worker がデプロイされているか。3分を超えると failed（GENERATION_TIMEOUT）になる |
 | 画像の URL が開けない（local） | `.env` の `PUBLIC_SUPABASE_URL` が `http://127.0.0.1:54321` か（実機から開く場合は PC の IP アドレス） |
 | `/docs` が 404 | `MOCK_MODE=true` の環境のみ公開している |
+| `/docs` が空・`/openapi.yaml` が 500 | `supabase/functions/api/openapi.yaml`（同梱用コピー）が存在するか。openapi.yaml を変更したら `cp openapi/openapi.yaml supabase/functions/api/openapi.yaml` |

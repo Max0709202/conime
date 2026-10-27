@@ -28,10 +28,6 @@ enabled = true
 enabled = true
 port = 54323
 
-[inbucket]
-enabled = true
-port = 54324
-
 [storage]
 enabled = true
 file_size_limit = "5MiB"
@@ -68,10 +64,11 @@ policy = "per_worker"
 deno_version = 2
 
 # アプリ API。401 TOKEN_EXPIRED / UNAUTHENTICATED を区別して返すため JWT は関数内で検証する。
-# GET /docs 用に openapi.yaml を同梱する
+# GET /docs 用に openapi.yaml のコピーを同梱する（Edge Runtime は supabase/functions の外のファイルを同梱できない。
+# 正は openapi/openapi.yaml。一致は api/contract_test.ts で検証）
 [functions.api]
 verify_jwt = false
-static_files = ["../openapi/openapi.yaml"]
+static_files = ["./functions/api/openapi.yaml"]
 
 # 生成ジョブの実行。WORKER_SECRET ヘッダーで保護（api と pg_cron から呼ばれる）
 [functions.worker]

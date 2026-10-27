@@ -42,6 +42,12 @@ for (const [path, item] of Object.entries<Record<string, Record<string, unknown>
   }
 }
 
+Deno.test("関数に同梱する openapi.yaml（GET /docs 用）が正の openapi/openapi.yaml と同じ内容", async () => {
+  const canonical = await Deno.readTextFile(new URL("../../../openapi/openapi.yaml", import.meta.url));
+  const bundled = await Deno.readTextFile(new URL("./openapi.yaml", import.meta.url));
+  assertEquals(bundled, canonical, "cp openapi/openapi.yaml supabase/functions/api/openapi.yaml で更新する");
+});
+
 Deno.test("openapi.yaml：アプリ API は39本（実動作13・モック26）", () => {
   assertEquals(appOps.length, 39);
   assertEquals(appOps.filter((o) => o.stage === "live").length, 13);

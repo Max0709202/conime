@@ -5,20 +5,16 @@ import type { AppEnv } from "./context.ts";
 // GET /docs：openapi.yaml の閲覧用ページ（Redoc）。dev（MOCK_MODE=true）のみ公開する（API11）
 export const docs = new Hono<AppEnv>();
 
-// config.toml の static_files で同梱した openapi.yaml を読む（local の functions serve とデプロイ後でパスが異なるため順に試す）
-const CANDIDATES = [
-  new URL("../../../openapi/openapi.yaml", import.meta.url),
-  new URL("./openapi/openapi.yaml", `file://${Deno.cwd()}/`),
-  new URL("../openapi/openapi.yaml", `file://${Deno.cwd()}/`),
-];
+// openapi.yaml の同梱コピー（config.toml の static_files）。Edge Runtime は supabase/functions の外のファイルを同梱できないため、
+// 正の openapi/openapi.yaml と同じ内容のコピーを関数ディレクトリに置く（一致は api/contract_test.ts で検証）
+const SPEC_URL = new URL("./openapi.yaml", import.meta.url);
 
 async function readSpec(): Promise<string | null> {
-  for (const url of CANDIDATES) {
-    try {
-      return await Deno.readTextFile(url);
-    } catch { /* 次の候補 */ }
+  try {
+    return await Deno.readTextFile(SPEC_URL);
+  } catch {
+    return null;
   }
-  return null;
 }
 
 const HTML = `<!doctype html>

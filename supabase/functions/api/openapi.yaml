@@ -1,0 +1,2494 @@
+openapi: 3.1.0
+info:
+  title: CONIME App API
+  version: 1.0.0
+  summary: CONIME MVP（iPhone アプリ / Unity）向けアプリ API
+  description: |
+    CONIME MVP サーバーサイド設計書（CONIME-BE-SPEC-001 v1.0）第3章の API 仕様の正式な定義。
+
+    - アプリ API は 39 本（実動作 13 本・モック 26 本）。このほか Supabase Auth の認証 API 4 本（タグ `Auth`）を参考として記載する。
+    - `x-conime-stage: live` は第1段階で本実装（実動作）、`x-conime-stage: mock` は同じ契約のモック応答（第2段階で中身だけを差し替え）。
+    - 項目名は snake_case、日時は ISO 8601（UTC）、ID は UUID（キャラIDのみ public_code）。
+    - 成功時は `data`（一覧は `meta` にページング情報）、失敗時は `error` を返す。アプリは HTTP ステータスではなく `error.code` で分岐する（API02）。
+    - 項目の追加は後方互換として扱う。アプリは未知の項目を無視する。
+    - dev 環境では `X-Mock-Scenario` ヘッダーで異常系を再現できる（API09・本番では無視）。
+  contact:
+    name: CONIME バックエンド担当
+  license:
+    name: Proprietary（貴社に帰属）
+    identifier: LicenseRef-Proprietary
+servers:
+  - url: https://{projectRef}.supabase.co/functions/v1/api/v1
+    description: dev（検証）環境
+    variables:
+      projectRef:
+        default: your-project-ref
+        description: Supabase プロジェクトの Reference ID
+  - url: http://127.0.0.1:54321/functions/v1/api/v1
+    description: local（supabase start + supabase functions serve）
+  - url: http://127.0.0.1:4010
+    description: Prism ローカルモック（npx @stoplight/prism-cli mock openapi/openapi.yaml）
+security:
+  - apiKey: []
+    bearerAuth: []
+tags:
+  - name: Auth
+    description: Supabase Auth（ベース URL は `/auth/v1`。応答・エラー形式は Supabase Auth の仕様に従う）
+  - name: System
+    description: 活死確認
+  - name: Questions
+    description: 質問定義（Q-1・Q-6）
+  - name: Consent
+    description: アカウント・同意（AC-1・AC-2）
+  - name: Diagnosis
+    description: 診断送信・生成状態・結果（Q-2・Q-3）
+  - name: Character
+    description: マイキャラ（Q-4・Q-7・L-3）
+  - name: Users
+    description: 他ユーザー・推薦（M-1〜M-4・Q-5）
+  - name: Guilds
+    description: ギルド（G-1〜G-5）
+  - name: Conversations
+    description: トークルーム・DM（C-1〜C-5）
+  - name: Growth
+    description: グッと・成長（C-3・L-1〜L-5）
+  - name: Navigator
+    description: ナビゲーター（N-1・N-2）
+  - name: Notifications
+    description: 通知（NT-1）
+  - name: Safety
+    description: 安心安全・退会（S-1・S-2・AC-3）
+
+paths:
+  # ===================================================================== Auth（Supabase Auth）
+  /auth/v1/signup:
+    servers:
+      - url: https://{projectRef}.supabase.co
+        variables:
+          projectRef:
+            default: your-project-ref
+      - url: http://127.0.0.1:54321
+    post:
+      tags: [Auth]
+      operationId: authSignup
+      summary: サインアップ（Supabase Auth）
+      description: メールアドレス＋パスワード（8文字以上）。dev ではメール確認が無効のため、応答にトークンが含まれる（U-02）。
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                data:
+                  type: object
+                  description: ユーザーメタデータ。display_name は profiles に反映される
+                  properties:
+                    display_name: { type: string, maxLength: 30 }
+            example:
+              email: user@example.com
+              password: conime-pass-2026
+              data: { display_name: ゆうき }
+      responses:
+        '200':
+          description: 登録成功（メール確認無効時はセッションを返す）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '400': { $ref: '#/components/responses/AuthError' }
+        '422': { $ref: '#/components/responses/AuthError' }
+  /auth/v1/token:
+    servers:
+      - url: https://{projectRef}.supabase.co
+        variables:
+          projectRef:
+            default: your-project-ref
+      - url: http://127.0.0.1:54321
+    post:
+      tags: [Auth]
+      operationId: authToken
+      summary: ログイン（grant_type=password）・トークン更新（grant_type=refresh_token）
+      description: |
+        リフレッシュトークンは使い捨てで、更新のたびに再発行される。iOS キーチェーンに保存し、アクセストークンはメモリのみで保持する（連携03）。
+      security:
+        - apiKey: []
+      parameters:
+        - in: query
+          name: grant_type
+          required: true
+          schema: { type: string, enum: [password, refresh_token] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  title: password
+                  required: [email, password]
+                  properties:
+                    email: { type: string, format: email }
+                    password: { type: string }
+                - type: object
+                  title: refresh_token
+                  required: [refresh_token]
+                  properties:
+                    refresh_token: { type: string }
+            example:
+              email: user@example.com
+              password: conime-pass-2026
+      responses:
+        '200':
+          description: トークン発行
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '400': { $ref: '#/components/responses/AuthError' }
+  /auth/v1/logout:
+    servers:
+      - url: https://{projectRef}.supabase.co
+        variables:
+          projectRef:
+            default: your-project-ref
+      - url: http://127.0.0.1:54321
+    post:
+      tags: [Auth]
+      operationId: authLogout
+      summary: ログアウト（リフレッシュトークンを失効）
+      parameters:
+        - in: query
+          name: scope
+          schema: { type: string, enum: [global, local, others], default: global }
+          description: local はこの端末のセッションのみ、global は全端末のセッションを失効する
+      responses:
+        '204': { description: ログアウト完了 }
+        '401': { $ref: '#/components/responses/AuthError' }
+
+  # ===================================================================== 実動作（13本）
+  /health:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: 活死確認
+      x-conime-stage: live
+      x-requirements: []
+      security:
+        - apiKey: []
+      responses:
+        '200':
+          description: 稼働中
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [status, api_version, mock_mode, time]
+                    properties:
+                      status: { type: string, enum: [ok] }
+                      api_version: { type: string }
+                      mock_mode: { type: boolean }
+                      time: { type: string, format: date-time }
+              example:
+                data: { status: ok, api_version: 1.0.0, mock_mode: true, time: '2026-10-20T03:00:00Z' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /question-sets/current:
+    get:
+      tags: [Questions]
+      operationId: getCurrentQuestionSet
+      summary: 公開中の質問定義を取得
+      description: |
+        質問・選択肢・回答形式・上限・用途はサーバーが管理し、アプリは取得した定義どおりに出題する（Q-1・Q-6）。
+        アプリは question_set.id と version を回答と一緒に端末保存し、送信時に添える。
+        ETag / If-None-Match に対応し、変更がなければ 304 を返す。
+      x-conime-stage: live
+      x-requirements: [Q-1, Q-6]
+      security:
+        - apiKey: []
+      parameters:
+        - in: header
+          name: If-None-Match
+          schema: { type: string }
+          description: 前回の応答の ETag
+      responses:
+        '200':
+          description: 公開中の質問セット
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuestionSetResponse' }
+              example:
+                data:
+                  question_set: { id: 0b9d6c1e-5a4f-4c47-9d0a-000000000001, version: 1, published_at: '2026-10-20T00:00:00Z' }
+                  questions:
+                    - id: 5c21a8f0-0000-4000-8000-000000000001
+                      code: Q1
+                      order: 1
+                      title: 好きなアニメ（マンガ含む）3作品
+                      answer_type: free_fields
+                      required: true
+                      constraints: { field_count: 3, required_field_count: 3, max_length: 50 }
+                      usages: [match_score, profile_display]
+                      options: []
+                    - id: 8e04a8f0-0000-4000-8000-000000000009
+                      code: Q9
+                      order: 9
+                      title: 好きな楽しみ方
+                      answer_type: multi_choice
+                      required: true
+                      constraints: { min_select: 1, max_select: 3 }
+                      usages: [match_score, profile_display]
+                      options:
+                        - { code: A, label: 視聴・読書 }
+                        - { code: B, label: グッズ }
+        '304': { description: 変更なし（If-None-Match が ETag と一致） }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /consent-documents/current:
+    get:
+      tags: [Consent]
+      operationId: getCurrentConsentDocuments
+      summary: 最新の同意文書を取得
+      description: terms（利用規約）・privacy（プライバシーポリシー）・ai_transfer（外部 AI 送信、AC-2）の最新の有効版。文言は貴社支給（U-03・U-21）。
+      x-conime-stage: live
+      x-requirements: [AC-2]
+      security:
+        - apiKey: []
+      responses:
+        '200':
+          description: 最新の有効版の一覧
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ConsentDocument' }
+              example:
+                data:
+                  - id: c0a5e0d0-0000-4000-8000-000000000001
+                    doc_type: terms
+                    version: 1
+                    title: CONIME 利用規約（検証用の仮文書）
+                    body: 本文は貴社支給の利用規約で差し替えます（U-21）。
+                    requires_reconsent: false
+                    published_at: '2026-10-20T00:00:00Z'
+                  - id: c0a5e0d0-0000-4000-8000-000000000003
+                    doc_type: ai_transfer
+                    version: 1
+                    title: 外部 AI サービスへの情報送信について（検証用の仮文書）
+                    body: 送信先・送信する情報・目的を記載します。
+                    requires_reconsent: true
+                    published_at: '2026-10-20T00:00:00Z'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /me:
+    get:
+      tags: [Consent]
+      operationId: getMe
+      summary: 自分の状態（プロフィール・同意・診断状況）
+      description: SC-01 トップで遷移先を決めるために使う。next_action に従って画面を切り替える。
+      x-conime-stage: live
+      x-requirements: [AC-1]
+      responses:
+        '200':
+          description: 自分の状態
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Me' }
+              example:
+                data:
+                  user_id: d0000000-0000-4000-8000-000000000002
+                  email: diagnosed@conime.test
+                  display_name: 診断済みユーザー
+                  role: user
+                  status: active
+                  consents: { all_granted: true, ai_transfer_granted: true }
+                  diagnosis: { status: completed, submission_id: e0000000-0000-4000-8000-000000000002 }
+                  has_character: true
+                  next_action: ready
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /me/consents:
+    get:
+      tags: [Consent]
+      operationId: getMyConsents
+      summary: 自分の同意状況
+      x-conime-stage: live
+      x-requirements: [AC-2]
+      responses:
+        '200':
+          description: 最新の有効版ごとの同意状況
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsentStatusResponse' }
+              example:
+                data:
+                  all_granted: true
+                  ai_transfer_granted: true
+                  items:
+                    - doc_type: ai_transfer
+                      document_id: c0a5e0d0-0000-4000-8000-000000000003
+                      version: 1
+                      title: 外部 AI サービスへの情報送信について（検証用の仮文書）
+                      requires_reconsent: true
+                      status: granted
+                      consent_id: 2ec205a9-8d3f-4bb2-9e55-fa58b51a783f
+                      decided_at: '2026-10-20T03:05:00Z'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Consent]
+      operationId: recordConsents
+      summary: 同意・撤回を記録
+      description: |
+        最新の有効版の文書に対して granted（同意）または revoked（撤回）を記録する。履歴は追記のみ。
+        ai_transfer を revoked にすると、以降の AI 送信（POST /diagnoses・retry・ナビゲーター）は 403 CONSENT_REQUIRED になる（送信済みデータの扱いは U-03）。
+      x-conime-stage: live
+      x-requirements: [AC-2]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsentRecordRequest' }
+            example:
+              consents:
+                - { document_id: c0a5e0d0-0000-4000-8000-000000000001, decision: granted }
+                - { document_id: c0a5e0d0-0000-4000-8000-000000000002, decision: granted }
+                - { document_id: c0a5e0d0-0000-4000-8000-000000000003, decision: granted }
+              app_version: 1.0.0
+      responses:
+        '201':
+          description: 記録後の同意状況
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsentStatusResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/IdempotencyKeyReused' }
+
+  /diagnoses:
+    post:
+      tags: [Diagnosis]
+      operationId: submitDiagnosis
+      summary: 診断回答を一括送信する（登録・AI送信同意の後）
+      description: |
+        登録と AI 送信同意の完了後に、端末に保存した回答を一括で送信する（API07）。1ユーザー1回。
+        同じ Idempotency-Key の再送には初回と同じ 202 応答（同じ submission_id）を返す。
+        成功時は同じトランザクションで「送信・回答・生成ジョブ」を登録し、生成は worker が非同期で行う。
+
+        | 検証項目 | ルール | 違反時 |
+        |---|---|---|
+        | 同意 | ai_transfer の有効な同意がある | 403 CONSENT_REQUIRED |
+        | 送信回数 | そのユーザーの送信が未登録 | 409 ALREADY_SUBMITTED（details に既存の submission_id） |
+        | 質問セットの版 | published、または deprecated（版上げ後30日の猶予期間・U-22）のみ受付 | 409 QUESTION_SET_OUTDATED |
+        | 回答の網羅 | 必須質問はすべて含む。未知の code・同じ code の重複は不可 | 400 VALIDATION_ERROR |
+        | single_choice | option_codes がちょうど1つで定義済みの code | 400 VALIDATION_ERROR |
+        | multi_choice | min_select〜max_select 個、重複なし | 400 VALIDATION_ERROR |
+        | free_fields | texts の要素数 = field_count。必須欄（先頭から required_field_count 個）は空白のみ不可。各 max_length 以内 | 400 VALIDATION_ERROR |
+        | free_multi | texts は1要素・max_length 以内（区切りの解析はサーバー） | 400 VALIDATION_ERROR |
+
+        文字数は Unicode のコードポイント数で数える。
+      x-conime-stage: live
+      x-requirements: [Q-2, Q-3, Q-6, AC-2]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+        - $ref: '#/components/parameters/MockScenario'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DiagnosisSubmitRequest' }
+            example:
+              question_set_id: 0b9d6c1e-5a4f-4c47-9d0a-000000000001
+              question_set_version: 1
+              answers:
+                - { question_code: Q1, texts: [作品A, 作品B, 作品C] }
+                - { question_code: Q6, option_codes: [B] }
+                - { question_code: Q7, texts: [作品D、作品E] }
+                - { question_code: Q9, option_codes: [A, C, D] }
+              answered_at: '2026-10-20T03:10:00Z'
+      responses:
+        '202':
+          description: 受付済み
+          headers:
+            Location:
+              description: 状態取得 URL（GET /diagnoses/{submission_id}）
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/DiagnosisAccepted' }
+              example:
+                data:
+                  submission_id: a3f7b2c1-0000-4000-8000-000000000301
+                  status: received
+                  submitted_at: '2026-10-20T03:10:02Z'
+                  poll_after_seconds: 3
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/ConsentRequired' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/IdempotencyKeyReused' }
+
+  /diagnoses/{submission_id}:
+    get:
+      tags: [Diagnosis]
+      operationId: getDiagnosisStatus
+      summary: 生成状態を取得
+      description: |
+        状態だけを返し、何度呼んでも生成を重複させない（設計04）。poll_after_seconds ごとに呼ぶ。
+        completed になったら GET /me/diagnosis-result で結果を取得する。failed は回答を保持しており、POST /diagnoses/{id}/retry で再試行できる。
+        生成の待機上限は未定のため（U-08）、サーバー側タイムアウト3分で failed（error_code = GENERATION_TIMEOUT）とする。
+        他人の submission_id は 404 を返す。
+      x-conime-stage: live
+      x-requirements: [Q-3]
+      parameters:
+        - $ref: '#/components/parameters/SubmissionId'
+      responses:
+        '200':
+          description: 生成状態
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/DiagnosisStatus' }
+              example:
+                data:
+                  submission_id: a3f7b2c1-0000-4000-8000-000000000301
+                  status: processing
+                  submitted_at: '2026-10-20T03:10:02Z'
+                  completed_at: null
+                  error_code: null
+                  poll_after_seconds: 3
+                  retryable: false
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /diagnoses/{submission_id}/retry:
+    post:
+      tags: [Diagnosis]
+      operationId: retryDiagnosis
+      summary: 生成失敗時の再試行
+      description: |
+        status が failed のときだけ新しい生成ジョブを登録し、received に戻す。回答は再送不要。
+        生成中（received / processing）は 409 GENERATION_IN_PROGRESS（アプリは状態取得を継続）。completed の場合は何もせず現在の状態を返す。
+      x-conime-stage: live
+      x-requirements: [Q-3, AC-2]
+      parameters:
+        - $ref: '#/components/parameters/SubmissionId'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '202':
+          description: 再試行を受付
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/DiagnosisStatus' }
+              example:
+                data:
+                  submission_id: a3f7b2c1-0000-4000-8000-000000000301
+                  status: received
+                  submitted_at: '2026-10-20T03:10:02Z'
+                  completed_at: null
+                  error_code: null
+                  poll_after_seconds: 3
+                  retryable: false
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/ConsentRequired' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /me/diagnosis-result:
+    get:
+      tags: [Diagnosis]
+      operationId: getMyDiagnosisResult
+      summary: プロフィール・キャラ・画像・推薦を一括取得
+      description: |
+        結果画面（SC-03・SC-04）に必要な情報を1回で取得する。部分完了に備え各部分に status を持つ（U-08）。
+        character.name は初回 null。命名後に PATCH /me/character で登録する（Q-3・Q-4）。extra は表示項目の追加用で、未知のキーは無視する。
+        画像 URL は署名付き（1時間）。推薦は第2段階（P2-3）で生成するため、第1段階は status = pending で空配列を返す。
+        診断を送信していない場合は 404。
+      x-conime-stage: live
+      x-requirements: [Q-3, Q-5]
+      responses:
+        '200':
+          description: 診断結果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/DiagnosisResult' }
+              example:
+                data:
+                  submission: { submission_id: e0000000-0000-4000-8000-000000000002, status: completed }
+                  profile:
+                    status: ready
+                    personality: 落ち着いていて、仲間思いの守り手タイプ。
+                    items:
+                      - { key: favorite_works, label: 好きな作品, values: [作品A, 作品B, 作品C] }
+                    ai_comments: [仲間との絆を大切にするあなたにぴったりのキャラクターが誕生しました。]
+                  character:
+                    public_code: C-7K3M9Q2X
+                    name: null
+                    level: 1
+                    species: ロボット
+                    class: ガーディアン
+                    attribute: 光
+                    rarity: SR
+                    title: はじまりの守り手
+                    personality: 落ち着いていて、仲間思いの守り手タイプ。
+                    strengths: [仲間を支える, 粘り強い]
+                    weaknesses: [考えすぎる]
+                    skills:
+                      - { name: ひかりの盾, description: 仲間を守る光の盾を張る }
+                    extra: {}
+                  image:
+                    status: ready
+                    url: https://your-project-ref.supabase.co/storage/v1/object/sign/character-images/d0000000-0000-4000-8000-000000000002/current.png?token=...
+                    expires_at: '2026-10-20T04:10:00Z'
+                    stage: 0
+                  recommendations: { status: pending, works: [], guilds: [], users: [] }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /me/character:
+    get:
+      tags: [Character]
+      operationId: getMyCharacter
+      summary: マイキャラ詳細
+      description: EXP・レベル・グッとポイントはサーバーの計算値をそのまま表示する（L-5）。診断前（キャラ未生成）は 404。
+      x-conime-stage: live
+      x-requirements: [Q-7, L-5]
+      responses:
+        '200':
+          description: マイキャラ
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Character' }
+              example:
+                data:
+                  public_code: C-7K3M9Q2X
+                  name: ルミナ
+                  species: ロボット
+                  class: ガーディアン
+                  attribute: 光
+                  rarity: SR
+                  title: はじまりの守り手
+                  level: 1
+                  max_level: 100
+                  exp_total: 0
+                  goodto_points: 0
+                  personality: 落ち着いていて、仲間思いの守り手タイプ。
+                  strengths: [仲間を支える, 粘り強い]
+                  weaknesses: [考えすぎる]
+                  skills:
+                    - { name: ひかりの盾, description: 仲間を守る光の盾を張る }
+                  status_items: { stats: { hp: 72, atk: 48, def: 81, spd: 55 }, theme_color: '#8E4EC6' }
+                  image: { status: ready, url: 'https://your-project-ref.supabase.co/storage/v1/object/sign/character-images/...', expires_at: '2026-10-20T04:10:00Z', stage: 0 }
+                  created_at: '2026-10-20T03:10:07Z'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Character]
+      operationId: renameMyCharacter
+      summary: キャラ名の変更
+      description: |
+        変更できるのはキャラ名のみ（Q-4）。1〜20文字（仮・U-07）、前後の空白は除去し、改行・制御文字は不可。
+        public_code・level 等のその他の項目を送っても無視する（キャラIDは変更不可）。
+      x-conime-stage: live
+      x-requirements: [Q-4]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 20 }
+            example: { name: ルミナ }
+      responses:
+        '200':
+          description: 変更後のマイキャラ
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Character' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /me/character/image:
+    get:
+      tags: [Character]
+      operationId: getMyCharacterImage
+      summary: 現在画像と処理状態
+      description: 進化履歴は保持せず、現在画像1件のみ（L-3）。生成に失敗しても既存画像は保持する。URL は署名付き（1時間）。
+      x-conime-stage: live
+      x-requirements: [L-3]
+      responses:
+        '200':
+          description: 現在画像
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/CharacterImage' }
+              example:
+                data: { status: ready, url: 'https://your-project-ref.supabase.co/storage/v1/object/sign/character-images/...', expires_at: '2026-10-20T04:10:00Z', stage: 0 }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ===================================================================== モック（26本）
+  /users/{user_id}:
+    get:
+      tags: [Users]
+      operationId: getUserProfile
+      summary: 他ユーザーの公開プロフィール
+      x-conime-stage: mock
+      x-requirements: [M-2, M-4]
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: 公開プロフィール
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/PublicUser' }
+              example:
+                data:
+                  id: b7e2c3d4-1111-4a2b-9c3d-000000000101
+                  display_name: ゆうき
+                  character:
+                    public_code: C-9QX2M7KD
+                    name: ソラカ
+                    level: 7
+                    species: スピリット
+                    class: メイジ
+                    attribute: 風
+                    rarity: R
+                    title: そよ風の旅人
+                    thumbnail_url: https://your-project-ref.supabase.co/storage/v1/object/sign/character-images/...
+                  profile_items:
+                    - { key: favorite_works, label: 好きな作品, values: [作品A, 作品B] }
+                  can_start_dm: true
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /me/recommendations:
+    get:
+      tags: [Users]
+      operationId: getMyRecommendations
+      summary: 推薦結果（ユーザー・ギルド・作品）
+      description: 相性%（compatibility）と一致した項目（matched_items）はサーバーの計算値をそのまま表示する（M-3）。件数は各最大3件（仮・U-09）。
+      x-conime-stage: mock
+      x-requirements: [Q-5, M-1, M-2, M-3]
+      parameters:
+        - in: query
+          name: kind
+          required: true
+          schema: { type: string, enum: [user, guild, work] }
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: 推薦結果（kind により要素の形が変わる）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      anyOf:
+                        - $ref: '#/components/schemas/UserRecommendation'
+                        - $ref: '#/components/schemas/GuildRecommendation'
+                        - $ref: '#/components/schemas/WorkRecommendation'
+                  meta:
+                    type: object
+                    required: [generated_at]
+                    properties:
+                      generated_at: { type: [string, 'null'], format: date-time }
+              examples:
+                user:
+                  summary: kind=user
+                  value:
+                    data:
+                      - rank: 1
+                        user:
+                          id: b7e2c3d4-1111-4a2b-9c3d-000000000101
+                          display_name: ゆうき
+                          character: { name: ソラカ, level: 7, thumbnail_url: 'https://your-project-ref.supabase.co/storage/v1/object/sign/character-images/...' }
+                        compatibility: { value: 66, display: 66% }
+                        matched_items:
+                          - { question_code: Q1, label: 好きな作品, values: [作品A, 作品B] }
+                          - { question_code: Q9, label: 楽しみ方, values: [視聴・読書] }
+                        can_start_dm: true
+                    meta: { generated_at: '2026-10-20T03:15:00Z' }
+                guild:
+                  summary: kind=guild
+                  value:
+                    data:
+                      - rank: 1
+                        guild:
+                          id: 9c000000-0000-4000-8000-000000000001
+                          name: ファンタジー好きの酒場
+                          member_count: 37
+                          capacity: 100
+                          tags: [{ code: fantasy, label: ファンタジー }]
+                        compatibility: { value: 72, display: 72% }
+                        matched_items:
+                          - { question_code: Q11, label: 好きなジャンル・世界観, values: [ファンタジー] }
+                        reason: ファンタジー作品が好きなメンバーが多いギルドです
+                    meta: { generated_at: '2026-10-20T03:15:00Z' }
+                work:
+                  summary: kind=work
+                  value:
+                    data:
+                      - rank: 1
+                        work: { id: a0000000-0000-4000-8000-000000000004, title: 作品D }
+                        matched_items:
+                          - { question_code: Q1, label: 好きな作品, values: [作品A] }
+                        reason: 作品A が好きなあなたには、同じく仲間との絆を描く作品D がおすすめです
+                    meta: { generated_at: '2026-10-20T03:15:00Z' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /guilds:
+    get:
+      tags: [Guilds]
+      operationId: listGuilds
+      summary: ギルド一覧・検索
+      description: q はギルド名の部分一致、tag はタグ code。カーソル方式のページング。
+      x-conime-stage: mock
+      x-requirements: [G-1, G-2]
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string, maxLength: 50 }
+        - in: query
+          name: tag
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: 公開ギルドの一覧
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GuildListResponse' }
+              example:
+                data:
+                  - id: 9c000000-0000-4000-8000-000000000001
+                    name: ファンタジー好きの酒場
+                    description: 剣と魔法の世界が好きな人のギルド
+                    tags: [{ code: fantasy, label: ファンタジー }]
+                    member_count: 37
+                    capacity: 100
+                    is_member: false
+                    is_full: false
+                  - id: 9c000000-0000-4000-8000-000000000002
+                    name: 学園ものクラブ
+                    description: 学園作品について語るギルド
+                    tags: [{ code: school, label: 学園 }]
+                    member_count: 100
+                    capacity: 100
+                    is_member: false
+                    is_full: true
+                meta: { next_cursor: null }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /me/guilds:
+    get:
+      tags: [Guilds]
+      operationId: listMyGuilds
+      summary: 参加中のギルド
+      x-conime-stage: mock
+      x-requirements: [G-1, G-5]
+      parameters:
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: 参加中のギルド
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GuildListResponse' }
+              example:
+                data:
+                  - id: 9c000000-0000-4000-8000-000000000001
+                    name: ファンタジー好きの酒場
+                    description: 剣と魔法の世界が好きな人のギルド
+                    tags: [{ code: fantasy, label: ファンタジー }]
+                    member_count: 37
+                    capacity: 100
+                    is_member: true
+                    is_full: false
+                meta: { next_cursor: null }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /guilds/{guild_id}:
+    get:
+      tags: [Guilds]
+      operationId: getGuild
+      summary: ギルド詳細（トークルームIDを含む）
+      x-conime-stage: mock
+      x-requirements: [G-3, G-4]
+      parameters:
+        - $ref: '#/components/parameters/GuildId'
+      responses:
+        '200':
+          description: ギルド詳細
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/GuildDetail' }
+              example:
+                data:
+                  id: 9c000000-0000-4000-8000-000000000001
+                  name: ファンタジー好きの酒場
+                  description: 剣と魔法の世界が好きな人のギルド
+                  tags: [{ code: fantasy, label: ファンタジー }]
+                  member_count: 37
+                  capacity: 100
+                  is_member: true
+                  is_full: false
+                  leader_info: 運営スタッフ
+                  conversation_id: c0000000-0000-4000-8000-000000000001
+                  my_role: member
+                  joined_at: '2026-10-20T03:20:00Z'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /guilds/{guild_id}/join:
+    post:
+      tags: [Guilds]
+      operationId: joinGuild
+      summary: ギルドに参加
+      description: 定員（capacity）と所属上限（app_settings guild.max_memberships・U-16）は参加関数内の行ロックで守る。参加済みは 409 ALREADY_MEMBER（アプリは成功扱い）。
+      x-conime-stage: mock
+      x-requirements: [G-3, G-5, M-4]
+      parameters:
+        - $ref: '#/components/parameters/GuildId'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: 参加完了
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/GuildJoinResult' }
+              example:
+                data:
+                  guild_id: 9c000000-0000-4000-8000-000000000001
+                  conversation_id: c0000000-0000-4000-8000-000000000001
+                  member_count: 37
+                  capacity: 100
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /guilds/{guild_id}/announcements:
+    get:
+      tags: [Guilds]
+      operationId: listGuildAnnouncements
+      summary: お知らせ
+      x-conime-stage: mock
+      x-requirements: [G-4]
+      parameters:
+        - $ref: '#/components/parameters/GuildId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: お知らせ（新しい順）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Announcement' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+              example:
+                data:
+                  - id: 4a110000-0000-4000-8000-000000000001
+                    title: ギルドへようこそ
+                    body: 自己紹介をトークルームに書き込んでみましょう。
+                    published_at: '2026-10-20T00:00:00Z'
+                meta: { next_cursor: null }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /guilds/{guild_id}/members:
+    get:
+      tags: [Guilds]
+      operationId: listGuildMembers
+      summary: メンバー一覧
+      x-conime-stage: mock
+      x-requirements: [G-4]
+      parameters:
+        - $ref: '#/components/parameters/GuildId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: メンバー一覧
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/GuildMember' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+              example:
+                data:
+                  - user_id: b7e2c3d4-1111-4a2b-9c3d-000000000101
+                    display_name: ゆうき
+                    role: leader
+                    character: { name: ソラカ, level: 7, thumbnail_url: 'https://your-project-ref.supabase.co/storage/v1/object/sign/character-images/...' }
+                    joined_at: '2026-10-20T00:10:00Z'
+                meta: { next_cursor: null }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /conversations:
+    get:
+      tags: [Conversations]
+      operationId: listConversations
+      summary: DM スレッド一覧（未読有無を含む）
+      x-conime-stage: mock
+      x-requirements: [C-4]
+      parameters:
+        - in: query
+          name: kind
+          required: true
+          schema: { type: string, enum: [dm] }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: DM スレッド一覧（新着順）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/DmThread' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+              example:
+                data:
+                  - conversation_id: c0000000-0000-4000-8000-0000000000d1
+                    partner:
+                      user_id: b7e2c3d4-1111-4a2b-9c3d-000000000101
+                      display_name: ゆうき
+                      character: { name: ソラカ, level: 7, thumbnail_url: 'https://your-project-ref.supabase.co/storage/v1/object/sign/character-images/...' }
+                    last_message: { body: 今度一緒に作品D見ませんか？, created_at: '2026-10-20T04:00:00Z' }
+                    has_unread: true
+                    unread_count: 2
+                meta: { next_cursor: null }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /conversations/dm:
+    post:
+      tags: [Conversations]
+      operationId: startDm
+      summary: DM を開始（既存があればそのスレッド）
+      description: 開始条件は U-14 の仮置き（会員なら開始可、ブロック関係では不可）。
+      x-conime-stage: mock
+      x-requirements: [C-4, M-4]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+        - $ref: '#/components/parameters/MockScenario'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: { type: string, format: uuid }
+            example: { user_id: b7e2c3d4-1111-4a2b-9c3d-000000000101 }
+      responses:
+        '200':
+          description: DM スレッド
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [conversation_id, created]
+                    properties:
+                      conversation_id: { type: string, format: uuid }
+                      created: { type: boolean, description: 新しく作成した場合 true }
+              example:
+                data: { conversation_id: c0000000-0000-4000-8000-0000000000d1, created: false }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /conversations/{conversation_id}/messages:
+    get:
+      tags: [Conversations]
+      operationId: listMessages
+      summary: 履歴（新しい順、上限内）
+      description: 新しい順。保存上限（U-12）を超えた古い履歴は返さない。Realtime 切断からの復帰時は、この API で未取得分を取得する（C-1）。
+      x-conime-stage: mock
+      x-requirements: [C-1, C-2, C-5]
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: メッセージ履歴
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Message' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+              example:
+                data:
+                  - id: 9a40e1f2-3333-4c5d-8e6f-000000000201
+                    conversation_id: c0000000-0000-4000-8000-000000000001
+                    sender:
+                      type: user
+                      user_id: b7e2c3d4-1111-4a2b-9c3d-000000000101
+                      display_name: ゆうき
+                      role: leader
+                      character_thumbnail_url: https://your-project-ref.supabase.co/storage/v1/object/sign/character-images/...
+                    body: みなさん、よろしくお願いします！
+                    image_url: null
+                    created_at: '2026-10-20T03:30:00Z'
+                    goodto: { total_count: 12, granted_by_me: false }
+                  - id: 9a40e1f2-3333-4c5d-8e6f-000000000202
+                    conversation_id: c0000000-0000-4000-8000-000000000001
+                    sender: { type: system, user_id: null, display_name: CONIME, role: null, character_thumbnail_url: null }
+                    body: ゆうき さんが参加しました
+                    image_url: null
+                    created_at: '2026-10-20T03:29:00Z'
+                    goodto: { total_count: 0, granted_by_me: false }
+                meta: { next_cursor: null }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Conversations]
+      operationId: sendMessage
+      summary: テキスト・画像メッセージを送信
+      description: body（2000文字以内）と image_path（POST /uploads/message-images で取得）の少なくとも一方が必要。
+      x-conime-stage: mock
+      x-requirements: [C-1, C-4]
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+        - $ref: '#/components/parameters/MockScenario'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                body: { type: string, minLength: 1, maxLength: 2000 }
+                image_path: { type: string }
+            example: { body: こんにちは！ }
+      responses:
+        '201':
+          description: 送信したメッセージ
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Message' }
+              example:
+                data:
+                  id: 9a40e1f2-3333-4c5d-8e6f-000000000299
+                  conversation_id: c0000000-0000-4000-8000-000000000001
+                  sender:
+                    type: user
+                    user_id: d0000000-0000-4000-8000-000000000002
+                    display_name: 診断済みユーザー
+                    role: member
+                    character_thumbnail_url: https://your-project-ref.supabase.co/storage/v1/object/sign/character-images/...
+                  body: こんにちは！
+                  image_url: null
+                  created_at: '2026-10-20T04:05:00Z'
+                  goodto: { total_count: 0, granted_by_me: false }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /conversations/{conversation_id}/read:
+    post:
+      tags: [Conversations]
+      operationId: markConversationRead
+      summary: 既読に更新
+      x-conime-stage: mock
+      x-requirements: [C-4]
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/MockScenario'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                last_read_at: { type: string, format: date-time, description: 省略時はサーバー時刻 }
+            example: { last_read_at: '2026-10-20T04:05:00Z' }
+      responses:
+        '200':
+          description: 既読更新後の状態
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [conversation_id, last_read_at, unread_count]
+                    properties:
+                      conversation_id: { type: string, format: uuid }
+                      last_read_at: { type: string, format: date-time }
+                      unread_count: { type: integer, minimum: 0 }
+              example:
+                data: { conversation_id: c0000000-0000-4000-8000-0000000000d1, last_read_at: '2026-10-20T04:05:00Z', unread_count: 0 }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /uploads/message-images:
+    post:
+      tags: [Conversations]
+      operationId: createMessageImageUpload
+      summary: 画像アップロード用の署名付き URL
+      description: 形式は JPEG / PNG、容量は 5MB まで（仮・U-13）。取得した upload_url に PUT し、image_path をメッセージ送信に使う。
+      x-conime-stage: mock
+      x-requirements: [C-1, C-4]
+      parameters:
+        - $ref: '#/components/parameters/MockScenario'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content_type, size_bytes]
+              properties:
+                content_type: { type: string, enum: [image/jpeg, image/png] }
+                size_bytes: { type: integer, minimum: 1, maximum: 5242880 }
+            example: { content_type: image/jpeg, size_bytes: 345678 }
+      responses:
+        '201':
+          description: アップロード先
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [upload_url, image_path, expires_at, max_bytes]
+                    properties:
+                      upload_url: { type: string }
+                      image_path: { type: string }
+                      expires_at: { type: string, format: date-time }
+                      max_bytes: { type: integer }
+              example:
+                data:
+                  upload_url: https://your-project-ref.supabase.co/storage/v1/object/upload/sign/message-images/...
+                  image_path: message-images/d0000000-0000-4000-8000-000000000002/5e1f0000-0000-4000-8000-000000000001.jpg
+                  expires_at: '2026-10-20T04:15:00Z'
+                  max_bytes: 5242880
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /goodtos:
+    post:
+      tags: [Growth]
+      operationId: giveGoodto
+      summary: グッとを付与
+      description: |
+        同一ユーザー・同一対象に1回（UNIQUE(giver_id, target_type, target_id)）。自分の発言には付与できない。
+        新規は 201、付与済みは 409 DUPLICATE_GOODTO（error.details[0].total_count に累計）。どちらもアプリは累計をそのまま表示する。
+      x-conime-stage: mock
+      x-requirements: [C-3, L-1]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+        - $ref: '#/components/parameters/MockScenario'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_type, target_id]
+              properties:
+                target_type: { type: string, enum: [message] }
+                target_id: { type: string, format: uuid }
+            example: { target_type: message, target_id: 9a40e1f2-3333-4c5d-8e6f-000000000201 }
+      responses:
+        '201':
+          description: 付与完了
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/GoodtoResult' }
+              example:
+                data:
+                  target: { type: message, id: 9a40e1f2-3333-4c5d-8e6f-000000000201 }
+                  total_count: 12
+                  granted: true
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /me/goodtos/received:
+    get:
+      tags: [Growth]
+      operationId: listReceivedGoodtos
+      summary: 受け取ったグッとの一覧
+      x-conime-stage: mock
+      x-requirements: [L-4]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: 受け取ったグッと（新しい順）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ReceivedGoodto' }
+                  meta:
+                    type: object
+                    required: [next_cursor, total_count]
+                    properties:
+                      next_cursor: { type: [string, 'null'] }
+                      total_count: { type: integer, minimum: 0 }
+              example:
+                data:
+                  - id: 600d0000-0000-4000-8000-000000000001
+                    giver: { user_id: b7e2c3d4-1111-4a2b-9c3d-000000000101, display_name: ゆうき }
+                    target: { type: message, id: 9a40e1f2-3333-4c5d-8e6f-000000000299 }
+                    points: 1
+                    created_at: '2026-10-20T04:06:00Z'
+                meta: { next_cursor: null, total_count: 31 }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /me/growth:
+    get:
+      tags: [Growth]
+      operationId: getMyGrowth
+      summary: レベル・EXP・ポイント・次レベルまで
+      description: レベル上限100、5レベルごとに画像を更新（L-2・L-3）。アプリは再計算しない（L-5）。
+      x-conime-stage: mock
+      x-requirements: [L-2, L-5]
+      responses:
+        '200':
+          description: 成長状況
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Growth' }
+              example:
+                data:
+                  level: 12
+                  max_level: 100
+                  exp_total: 4820
+                  exp_current_level_start: 4500
+                  exp_next_level: 5100
+                  goodto_points: 310
+                  next_evolution_level: 15
+                  image: { status: ready, url: 'https://your-project-ref.supabase.co/storage/v1/object/sign/character-images/...', expires_at: '2026-10-20T04:10:00Z', stage: 10 }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /navigator/messages:
+    get:
+      tags: [Navigator]
+      operationId: listNavigatorMessages
+      summary: ナビゲーター履歴取得
+      x-conime-stage: mock
+      x-requirements: [N-1]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: ナビゲーター履歴（新しい順）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/NavigatorMessage' }
+                  meta:
+                    type: object
+                    required: [next_cursor, remaining_today, daily_limit]
+                    properties:
+                      next_cursor: { type: [string, 'null'] }
+                      remaining_today: { type: integer, minimum: 0 }
+                      daily_limit: { type: integer, minimum: 0 }
+              example:
+                data:
+                  - { id: 4a710000-0000-4000-8000-000000000002, role: navigator, body: ギルドホールから気になるギルドを探せます。, created_at: '2026-10-20T04:00:05Z' }
+                  - { id: 4a710000-0000-4000-8000-000000000001, role: user, body: ギルドに入るにはどうすればいい？, created_at: '2026-10-20T04:00:00Z' }
+                meta: { next_cursor: null, remaining_today: 29, daily_limit: 30 }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    post:
+      tags: [Navigator]
+      operationId: sendNavigatorMessage
+      summary: ナビゲーターへ質問送信
+      description: |
+        AI 送信同意が必要（未同意は 403 CONSENT_REQUIRED）。利用上限は1人1日30回（仮・U-18、超過は 429 RATE_LIMITED）。
+        生成 AI が一時的に利用できない場合は 503 AI_UNAVAILABLE を返し、アプリは定型の代替メッセージを表示する（N-2）。
+      x-conime-stage: mock
+      x-requirements: [N-1, N-2, AC-2]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+        - $ref: '#/components/parameters/MockScenario'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, minLength: 1, maxLength: 500 }
+            example: { body: ギルドに入るにはどうすればいい？ }
+      responses:
+        '201':
+          description: 質問と応答
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [question, reply, remaining_today]
+                    properties:
+                      question: { $ref: '#/components/schemas/NavigatorMessage' }
+                      reply: { $ref: '#/components/schemas/NavigatorMessage' }
+                      remaining_today: { type: integer, minimum: 0 }
+              example:
+                data:
+                  question: { id: 4a710000-0000-4000-8000-000000000001, role: user, body: ギルドに入るにはどうすればいい？, created_at: '2026-10-20T04:00:00Z' }
+                  reply: { id: 4a710000-0000-4000-8000-000000000002, role: navigator, body: ギルドホールから気になるギルドを探せます。, created_at: '2026-10-20T04:00:05Z' }
+                  remaining_today: 29
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/ConsentRequired' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/AiUnavailable' }
+
+  /me/notifications:
+    get:
+      tags: [Notifications]
+      operationId: listMyNotifications
+      summary: 通知一覧
+      description: 通知の種類は U-15 の仮置き（goodto_received / level_up / guild_announcement / dm_received / system）。
+      x-conime-stage: mock
+      x-requirements: [NT-1]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: 通知（新しい順）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Notification' }
+                  meta:
+                    type: object
+                    required: [next_cursor, unread_count]
+                    properties:
+                      next_cursor: { type: [string, 'null'] }
+                      unread_count: { type: integer, minimum: 0 }
+              example:
+                data:
+                  - { id: 70710000-0000-4000-8000-000000000001, type: goodto_received, title: グッとが届きました, body: ゆうき さんがあなたの発言にグッとしました, link: 'conime://conversations/c0000000-0000-4000-8000-000000000001', created_at: '2026-10-20T04:06:00Z', read_at: null }
+                  - { id: 70710000-0000-4000-8000-000000000002, type: level_up, title: レベルアップ！, body: ルミナが Lv.12 になりました, link: 'conime://me/character', created_at: '2026-10-20T04:06:01Z', read_at: null }
+                meta: { next_cursor: null, unread_count: 2 }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /me/notifications/read:
+    post:
+      tags: [Notifications]
+      operationId: markNotificationsRead
+      summary: 通知を閲覧済みに更新
+      description: notification_ids を指定するか、all = true で全件を閲覧済みにする。
+      x-conime-stage: mock
+      x-requirements: [NT-1]
+      parameters:
+        - $ref: '#/components/parameters/MockScenario'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                notification_ids:
+                  type: array
+                  maxItems: 100
+                  items: { type: string, format: uuid }
+                all: { type: boolean }
+            example: { notification_ids: [70710000-0000-4000-8000-000000000001] }
+      responses:
+        '200':
+          description: 更新結果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [updated_count, unread_count]
+                    properties:
+                      updated_count: { type: integer, minimum: 0 }
+                      unread_count: { type: integer, minimum: 0 }
+              example:
+                data: { updated_count: 1, unread_count: 1 }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /reports:
+    post:
+      tags: [Safety]
+      operationId: createReport
+      summary: 通報
+      x-conime-stage: mock
+      x-requirements: [S-1]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+        - $ref: '#/components/parameters/MockScenario'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_type, target_id, reason_code]
+              properties:
+                target_type: { type: string, enum: [message, character_image, navigator_reply, user] }
+                target_id: { type: string, format: uuid }
+                reason_code: { type: string, enum: [spam, harassment, inappropriate, impersonation, other] }
+                detail: { type: string, maxLength: 1000 }
+            example: { target_type: message, target_id: 9a40e1f2-3333-4c5d-8e6f-000000000201, reason_code: harassment, detail: 攻撃的な発言です }
+      responses:
+        '201':
+          description: 受付
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [report_id, status, created_at]
+                    properties:
+                      report_id: { type: string, format: uuid }
+                      status: { type: string, enum: [open] }
+                      created_at: { type: string, format: date-time }
+              example:
+                data: { report_id: 4e900000-0000-4000-8000-000000000001, status: open, created_at: '2026-10-20T04:10:00Z' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /me/blocks:
+    get:
+      tags: [Safety]
+      operationId: listMyBlocks
+      summary: ブロック一覧
+      x-conime-stage: mock
+      x-requirements: [S-2]
+      parameters:
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '200':
+          description: ブロック中のユーザー
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/BlockedUser' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+              example:
+                data:
+                  - { user_id: b7e2c3d4-1111-4a2b-9c3d-000000000102, display_name: ブロックしたユーザー, created_at: '2026-10-20T04:12:00Z' }
+                meta: { next_cursor: null }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /blocks:
+    post:
+      tags: [Safety]
+      operationId: createBlock
+      summary: ブロックを登録
+      description: ブロックすると相互に DM・推薦・メッセージ表示から除外する（U-14 の仮置き）。
+      x-conime-stage: mock
+      x-requirements: [S-2]
+      parameters:
+        - $ref: '#/components/parameters/MockScenario'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: { type: string, format: uuid }
+            example: { user_id: b7e2c3d4-1111-4a2b-9c3d-000000000102 }
+      responses:
+        '201':
+          description: 登録
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/BlockedUser' }
+              example:
+                data: { user_id: b7e2c3d4-1111-4a2b-9c3d-000000000102, display_name: ブロックしたユーザー, created_at: '2026-10-20T04:12:00Z' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /blocks/{user_id}:
+    delete:
+      tags: [Safety]
+      operationId: deleteBlock
+      summary: ブロックを解除
+      x-conime-stage: mock
+      x-requirements: [S-2]
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/MockScenario'
+      responses:
+        '204': { description: 解除完了（ブロックしていない場合も 204） }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /me/withdrawal:
+    post:
+      tags: [Safety]
+      operationId: requestWithdrawal
+      summary: 退会を申請
+      description: |
+        受付時点で status = withdrawn・全セッション失効により即時利用不可。個人データは30日後に定期ジョブで物理削除し、
+        ギルドの過去の発言は「退会したユーザー」として残す（U-17 の仮置き）。退会後の API は 403 ACCOUNT_WITHDRAWN。
+      x-conime-stage: mock
+      x-requirements: [AC-3]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+        - $ref: '#/components/parameters/MockScenario'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 500 }
+            example: { reason: 利用頻度が下がったため }
+      responses:
+        '202':
+          description: 退会を受付
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [status, requested_at, purge_scheduled_at]
+                    properties:
+                      status: { type: string, enum: [requested] }
+                      requested_at: { type: string, format: date-time }
+                      purge_scheduled_at: { type: string, format: date-time }
+              example:
+                data: { status: requested, requested_at: '2026-10-20T04:20:00Z', purge_scheduled_at: '2026-11-19T04:20:00Z' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: apikey
+      description: Supabase の anon key（公開前提のキー。権限は RLS で制御）。全要求に付ける
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Supabase Auth のアクセストークン（有効期限1時間）。期限切れは 401 TOKEN_EXPIRED
+
+  parameters:
+    IdempotencyKeyRequired:
+      in: header
+      name: Idempotency-Key
+      required: true
+      description: 「1つの操作」ごとにアプリが生成する UUID。自動・手動の再試行では同じ値を使う。診断送信のキーは回答と一緒に端末保存し、再起動後の再送でも同じ値を使う
+      schema: { type: string, format: uuid }
+    IdempotencyKeyOptional:
+      in: header
+      name: Idempotency-Key
+      required: false
+      description: 作成系 POST の重複送信防止。ユーザー×キーで応答を24時間保存し、同じ内容の再送には初回と同じ応答を返す。同じキーで内容が異なる場合は 422 IDEMPOTENCY_KEY_REUSED
+      schema: { type: string, format: uuid }
+    MockScenario:
+      in: header
+      name: X-Mock-Scenario
+      required: false
+      description: |
+        dev のみ（MOCK_MODE=true）。本番では無視する（API09）。
+        generation_failed：診断送信後に status が failed / generation_slow：completed まで60秒 / empty：一覧・推薦が0件 /
+        guild_full：409 GUILD_FULL / duplicate_goodto：409 DUPLICATE_GOODTO / token_expired：401 TOKEN_EXPIRED /
+        rate_limited：429（Retry-After: 10） / server_error：500 / timeout：20秒無応答 / ai_unavailable：503（ナビゲーター）
+      schema:
+        type: string
+        enum: [generation_failed, generation_slow, empty, guild_full, duplicate_goodto, token_expired, rate_limited, server_error, timeout, ai_unavailable]
+    SubmissionId:
+      in: path
+      name: submission_id
+      required: true
+      schema: { type: string, format: uuid }
+    UserId:
+      in: path
+      name: user_id
+      required: true
+      schema: { type: string, format: uuid }
+    GuildId:
+      in: path
+      name: guild_id
+      required: true
+      schema: { type: string, format: uuid }
+    ConversationId:
+      in: path
+      name: conversation_id
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      in: query
+      name: limit
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    Cursor:
+      in: query
+      name: cursor
+      description: 前回の応答の meta.next_cursor
+      schema: { type: string }
+
+  headers:
+    RetryAfter:
+      description: 再試行までの秒数
+      schema: { type: integer }
+
+  responses:
+    ValidationError:
+      description: 400 VALIDATION_ERROR（入力形式・上限違反。details に項目ごとの理由）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: answers[3].texts exceeds max_length
+              details:
+                - { field: 'answers[3].texts[0]', reason: max_length, limit: 100 }
+              request_id: req_01JA8XK2M3N4P5Q6R7S8T9V0W1
+    Unauthenticated:
+      description: 401 UNAUTHENTICATED（トークンなし・不正）/ TOKEN_EXPIRED（期限切れ。リフレッシュ1回 → 失敗時は再ログイン）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            error: { code: TOKEN_EXPIRED, message: access token has expired, details: [], request_id: req_01JA8XK2M3N4P5Q6R7S8T9V0W2 }
+    Forbidden:
+      description: 403 FORBIDDEN（権限なし・未所属・ブロック中）/ ACCOUNT_WITHDRAWN（退会済み）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            error: { code: ACCOUNT_WITHDRAWN, message: account has been withdrawn, details: [], request_id: req_01JA8XK2M3N4P5Q6R7S8T9V0W3 }
+    ConsentRequired:
+      description: 403 CONSENT_REQUIRED（AI 送信同意が未取得・撤回済み・旧版）。同意画面を表示する
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            error: { code: CONSENT_REQUIRED, message: valid ai_transfer consent is required, details: [{ doc_type: ai_transfer }], request_id: req_01JA8XK2M3N4P5Q6R7S8T9V0W4 }
+    NotFound:
+      description: 404 NOT_FOUND（対象が存在しない。診断前のキャラ取得・他人のデータを含む）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            error: { code: NOT_FOUND, message: character not found, details: [], request_id: req_01JA8XK2M3N4P5Q6R7S8T9V0W5 }
+    Conflict:
+      description: |
+        409 ALREADY_SUBMITTED（details に既存の submission_id）/ QUESTION_SET_OUTDATED / DUPLICATE_GOODTO（details に累計） /
+        GUILD_FULL / GUILD_LIMIT_REACHED / ALREADY_MEMBER / GENERATION_IN_PROGRESS
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            error: { code: ALREADY_SUBMITTED, message: diagnosis has already been submitted, details: [{ submission_id: a3f7b2c1-0000-4000-8000-000000000301 }], request_id: req_01JA8XK2M3N4P5Q6R7S8T9V0W6 }
+    IdempotencyKeyReused:
+      description: 422 IDEMPOTENCY_KEY_REUSED（同じ冪等キーで異なる内容。アプリの不具合として記録）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            error: { code: IDEMPOTENCY_KEY_REUSED, message: Idempotency-Key was used with a different request, details: [], request_id: req_01JA8XK2M3N4P5Q6R7S8T9V0W7 }
+    RateLimited:
+      description: 429 RATE_LIMITED（利用制限超過。Retry-After 秒後に再試行）
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            error: { code: RATE_LIMITED, message: too many requests, details: [{ retry_after_seconds: 10 }], request_id: req_01JA8XK2M3N4P5Q6R7S8T9V0W8 }
+    AiUnavailable:
+      description: 503 AI_UNAVAILABLE（生成 AI が一時的に利用不可。ナビゲーターは定型の代替メッセージ・N-2）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            error: { code: AI_UNAVAILABLE, message: generative AI is temporarily unavailable, details: [], request_id: req_01JA8XK2M3N4P5Q6R7S8T9V0W9 }
+    AuthError:
+      description: Supabase Auth のエラー（形式は Supabase Auth の仕様。誤パスワードは 400 invalid_credentials、登録済みメールは 422 user_already_exists）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code: { type: integer }
+              error_code: { type: string }
+              msg: { type: string }
+          example: { code: 400, error_code: invalid_credentials, msg: Invalid login credentials }
+
+  schemas:
+    # ----------------------------------------------------------------- 共通
+    ErrorCode:
+      type: string
+      enum:
+        - VALIDATION_ERROR
+        - UNAUTHENTICATED
+        - TOKEN_EXPIRED
+        - CONSENT_REQUIRED
+        - FORBIDDEN
+        - ACCOUNT_WITHDRAWN
+        - NOT_FOUND
+        - ALREADY_SUBMITTED
+        - QUESTION_SET_OUTDATED
+        - DUPLICATE_GOODTO
+        - GUILD_FULL
+        - GUILD_LIMIT_REACHED
+        - ALREADY_MEMBER
+        - GENERATION_IN_PROGRESS
+        - IDEMPOTENCY_KEY_REUSED
+        - RATE_LIMITED
+        - INTERNAL_ERROR
+        - AI_UNAVAILABLE
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, request_id]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message: { type: string, description: 開発者向けの説明。画面文言には使わない }
+            details:
+              type: array
+              items: { type: object }
+            request_id: { type: string }
+    PageMeta:
+      type: object
+      required: [next_cursor]
+      properties:
+        next_cursor: { type: [string, 'null'], description: null なら末尾 }
+    Compatibility:
+      type: object
+      required: [value, display]
+      properties:
+        value: { type: integer, minimum: 0, maximum: 100 }
+        display: { type: string, example: 66% }
+    MatchedItem:
+      type: object
+      required: [question_code, label, values]
+      properties:
+        question_code: { type: string }
+        label: { type: string }
+        values: { type: array, items: { type: string } }
+    TagRef:
+      type: object
+      required: [code, label]
+      properties:
+        code: { type: string }
+        label: { type: string }
+    CharacterThumb:
+      type: object
+      required: [name, level, thumbnail_url]
+      properties:
+        name: { type: [string, 'null'] }
+        level: { type: integer, minimum: 1, maximum: 100 }
+        thumbnail_url: { type: [string, 'null'] }
+
+    # ----------------------------------------------------------------- 認証
+    AuthSession:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: bearer }
+        expires_in: { type: integer, example: 3600 }
+        expires_at: { type: integer }
+        refresh_token: { type: string }
+        user:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            email: { type: string }
+
+    # ----------------------------------------------------------------- 質問・同意
+    QuestionSetResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [question_set, questions]
+          properties:
+            question_set:
+              type: object
+              required: [id, version, published_at]
+              properties:
+                id: { type: string, format: uuid }
+                version: { type: integer, minimum: 1 }
+                published_at: { type: string, format: date-time }
+            questions:
+              type: array
+              items: { $ref: '#/components/schemas/Question' }
+    Question:
+      type: object
+      required: [id, code, order, title, answer_type, required, constraints, usages, options]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, example: Q1, description: 版をまたいで同じ意味なら同じ code }
+        order: { type: integer, minimum: 1, description: 出題順（問番号表示） }
+        title: { type: string }
+        answer_type: { type: string, enum: [single_choice, multi_choice, free_fields, free_multi] }
+        required: { type: boolean }
+        constraints:
+          type: object
+          properties:
+            min_select: { type: integer }
+            max_select: { type: integer }
+            field_count: { type: integer }
+            required_field_count: { type: integer }
+            max_length: { type: integer }
+        usages:
+          type: array
+          items: { type: string, enum: [character_base, character_adjust, match_score, profile_display] }
+        options:
+          type: array
+          items:
+            type: object
+            required: [code, label]
+            properties:
+              code: { type: string }
+              label: { type: string }
+    ConsentDocument:
+      type: object
+      required: [id, doc_type, version, title, body, requires_reconsent, published_at]
+      properties:
+        id: { type: string, format: uuid }
+        doc_type: { type: string, enum: [terms, privacy, ai_transfer] }
+        version: { type: integer, minimum: 1 }
+        title: { type: string }
+        body: { type: string }
+        requires_reconsent: { type: boolean, description: true の版では旧版への同意を無効とし再同意を求める }
+        published_at: { type: string, format: date-time }
+    ConsentRecordRequest:
+      type: object
+      required: [consents]
+      properties:
+        consents:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: object
+            required: [document_id, decision]
+            properties:
+              document_id: { type: string, format: uuid, description: GET /consent-documents/current の id（最新の有効版のみ） }
+              decision: { type: string, enum: [granted, revoked] }
+        app_version: { type: string, maxLength: 32 }
+    ConsentStatusItem:
+      type: object
+      required: [doc_type, document_id, version, title, requires_reconsent, status, consent_id, decided_at]
+      properties:
+        doc_type: { type: string, enum: [terms, privacy, ai_transfer] }
+        document_id: { type: string, format: uuid }
+        version: { type: integer }
+        title: { type: string }
+        requires_reconsent: { type: boolean }
+        status: { type: string, enum: [granted, revoked, not_decided, reconsent_required] }
+        consent_id: { type: [string, 'null'], format: uuid }
+        decided_at: { type: [string, 'null'], format: date-time }
+    ConsentStatusResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [all_granted, ai_transfer_granted, items]
+          properties:
+            all_granted: { type: boolean }
+            ai_transfer_granted: { type: boolean }
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/ConsentStatusItem' }
+    Me:
+      type: object
+      required: [user_id, email, display_name, role, status, consents, diagnosis, has_character, next_action]
+      properties:
+        user_id: { type: string, format: uuid }
+        email: { type: [string, 'null'] }
+        display_name: { type: [string, 'null'] }
+        role: { type: string, enum: [user, admin] }
+        status: { type: string, enum: [active, withdrawn] }
+        consents:
+          type: object
+          required: [all_granted, ai_transfer_granted]
+          properties:
+            all_granted: { type: boolean }
+            ai_transfer_granted: { type: boolean }
+        diagnosis:
+          type: object
+          required: [status, submission_id]
+          properties:
+            status: { type: string, enum: [not_submitted, received, processing, completed, failed] }
+            submission_id: { type: [string, 'null'], format: uuid }
+        has_character: { type: boolean }
+        next_action:
+          type: string
+          enum: [consent_required, diagnosis_required, generating, retry_required, ready]
+          description: |
+            consent_required：同意画面へ / diagnosis_required：端末保存の回答を送信（または診断へ） /
+            generating：生成待ち画面へ / retry_required：再試行ボタンを表示 / ready：スクエアへ
+
+    # ----------------------------------------------------------------- 診断
+    DiagnosisSubmitRequest:
+      type: object
+      required: [question_set_id, question_set_version, answers]
+      properties:
+        question_set_id: { type: string, format: uuid }
+        question_set_version: { type: integer, minimum: 1 }
+        answered_at: { type: string, format: date-time }
+        answers:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: '#/components/schemas/Answer' }
+    Answer:
+      type: object
+      required: [question_code]
+      properties:
+        question_code: { type: string, example: Q9 }
+        option_codes: { type: array, items: { type: string }, description: 選択式（single_choice / multi_choice） }
+        texts: { type: array, items: { type: string }, description: 自由記述（free_fields / free_multi） }
+    DiagnosisStatusValue:
+      type: string
+      enum: [received, processing, completed, failed]
+    DiagnosisAccepted:
+      type: object
+      required: [submission_id, status, submitted_at, poll_after_seconds]
+      properties:
+        submission_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/DiagnosisStatusValue' }
+        submitted_at: { type: string, format: date-time }
+        poll_after_seconds: { type: integer, example: 3 }
+    DiagnosisStatus:
+      type: object
+      required: [submission_id, status, submitted_at, completed_at, error_code, poll_after_seconds, retryable]
+      properties:
+        submission_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/DiagnosisStatusValue' }
+        submitted_at: { type: string, format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+        error_code:
+          type: [string, 'null']
+          description: failed の理由（GENERATION_FAILED / GENERATION_TIMEOUT）
+        poll_after_seconds: { type: [integer, 'null'], description: received / processing のときの再取得間隔 }
+        retryable: { type: boolean, description: 'true なら POST /diagnoses/{submission_id}/retry で再試行できる' }
+    PartStatus:
+      type: string
+      enum: [pending, ready, failed]
+    DiagnosisResult:
+      type: object
+      required: [submission, profile, character, image, recommendations]
+      properties:
+        submission:
+          type: object
+          required: [submission_id, status]
+          properties:
+            submission_id: { type: string, format: uuid }
+            status: { $ref: '#/components/schemas/DiagnosisStatusValue' }
+        profile:
+          type: object
+          required: [status, personality, items, ai_comments]
+          properties:
+            status: { $ref: '#/components/schemas/PartStatus' }
+            personality: { type: [string, 'null'] }
+            items:
+              type: array
+              items:
+                type: object
+                required: [key, label, values]
+                properties:
+                  key: { type: string }
+                  label: { type: string }
+                  values: { type: array, items: { type: string } }
+            ai_comments: { type: array, items: { type: string } }
+        character:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/CharacterSummary'
+        image: { $ref: '#/components/schemas/CharacterImage' }
+        recommendations:
+          type: object
+          required: [status, works, guilds, users]
+          properties:
+            status: { type: string, enum: [pending, ready] }
+            works: { type: array, items: { $ref: '#/components/schemas/WorkRecommendation' } }
+            guilds: { type: array, items: { $ref: '#/components/schemas/GuildRecommendation' } }
+            users: { type: array, items: { $ref: '#/components/schemas/UserRecommendation' } }
+
+    # ----------------------------------------------------------------- キャラクター
+    Skill:
+      type: object
+      required: [name, description]
+      properties:
+        name: { type: string }
+        description: { type: string }
+    CharacterSummary:
+      type: object
+      required: [public_code, name, level, species, class, attribute, rarity, title, personality, strengths, weaknesses, skills, extra]
+      properties:
+        public_code: { type: string, pattern: '^C-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$', description: 画面表示用キャラID（U-07） }
+        name: { type: [string, 'null'], description: 初回は null }
+        level: { type: integer, minimum: 1, maximum: 100 }
+        species: { type: [string, 'null'] }
+        class: { type: [string, 'null'] }
+        attribute: { type: [string, 'null'] }
+        rarity: { type: [string, 'null'] }
+        title: { type: [string, 'null'], description: 称号（Q-7） }
+        personality: { type: [string, 'null'] }
+        strengths: { type: array, items: { type: string } }
+        weaknesses: { type: array, items: { type: string } }
+        skills: { type: array, items: { $ref: '#/components/schemas/Skill' } }
+        extra: { type: object, description: 表示項目の追加用。未知のキーは無視する }
+    CharacterImage:
+      type: object
+      required: [status, url, expires_at, stage]
+      properties:
+        status: { type: string, enum: [none, generating, ready, failed] }
+        url: { type: [string, 'null'], description: 署名付き URL（1時間） }
+        expires_at: { type: [string, 'null'], format: date-time }
+        stage: { type: integer, minimum: 0, description: 現在画像の進化段階（0 = 初期、5 = Lv.5 …） }
+    Character:
+      type: object
+      required: [public_code, name, species, class, attribute, rarity, title, level, max_level, exp_total, goodto_points, personality, strengths, weaknesses, skills, status_items, image, created_at]
+      properties:
+        public_code: { type: string, pattern: '^C-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$' }
+        name: { type: [string, 'null'] }
+        species: { type: [string, 'null'] }
+        class: { type: [string, 'null'] }
+        attribute: { type: [string, 'null'] }
+        rarity: { type: [string, 'null'] }
+        title: { type: [string, 'null'] }
+        level: { type: integer, minimum: 1, maximum: 100 }
+        max_level: { type: integer }
+        exp_total: { type: integer, minimum: 0 }
+        goodto_points: { type: integer, minimum: 0 }
+        personality: { type: [string, 'null'] }
+        strengths: { type: array, items: { type: string } }
+        weaknesses: { type: array, items: { type: string } }
+        skills: { type: array, items: { $ref: '#/components/schemas/Skill' } }
+        status_items: { type: object, description: 性格・得意・苦手・スキル・ステータス等。項目は増減する（Q-3） }
+        image: { $ref: '#/components/schemas/CharacterImage' }
+        created_at: { type: string, format: date-time }
+
+    # ----------------------------------------------------------------- ユーザー・推薦
+    PublicUser:
+      type: object
+      required: [id, display_name, character, profile_items, can_start_dm]
+      properties:
+        id: { type: string, format: uuid }
+        display_name: { type: [string, 'null'] }
+        character:
+          type: [object, 'null']
+          required: [public_code, name, level, thumbnail_url]
+          properties:
+            public_code: { type: string }
+            name: { type: [string, 'null'] }
+            level: { type: integer }
+            species: { type: [string, 'null'] }
+            class: { type: [string, 'null'] }
+            attribute: { type: [string, 'null'] }
+            rarity: { type: [string, 'null'] }
+            title: { type: [string, 'null'] }
+            thumbnail_url: { type: [string, 'null'] }
+        profile_items:
+          type: array
+          items:
+            type: object
+            required: [key, label, values]
+            properties:
+              key: { type: string }
+              label: { type: string }
+              values: { type: array, items: { type: string } }
+        can_start_dm: { type: boolean }
+    UserRecommendation:
+      type: object
+      required: [rank, user, compatibility, matched_items, can_start_dm]
+      properties:
+        rank: { type: integer, minimum: 1 }
+        user:
+          type: object
+          required: [id, display_name, character]
+          properties:
+            id: { type: string, format: uuid }
+            display_name: { type: [string, 'null'] }
+            character: { $ref: '#/components/schemas/CharacterThumb' }
+        compatibility: { $ref: '#/components/schemas/Compatibility' }
+        matched_items: { type: array, items: { $ref: '#/components/schemas/MatchedItem' } }
+        can_start_dm: { type: boolean }
+    GuildRecommendation:
+      type: object
+      required: [rank, guild, compatibility, matched_items, reason]
+      properties:
+        rank: { type: integer, minimum: 1 }
+        guild:
+          type: object
+          required: [id, name, member_count, capacity, tags]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            member_count: { type: integer }
+            capacity: { type: integer }
+            tags: { type: array, items: { $ref: '#/components/schemas/TagRef' } }
+        compatibility: { $ref: '#/components/schemas/Compatibility' }
+        matched_items: { type: array, items: { $ref: '#/components/schemas/MatchedItem' } }
+        reason: { type: [string, 'null'] }
+    WorkRecommendation:
+      type: object
+      required: [rank, work, matched_items, reason]
+      properties:
+        rank: { type: integer, minimum: 1 }
+        work:
+          type: object
+          required: [id, title]
+          properties:
+            id: { type: string, format: uuid }
+            title: { type: string }
+        matched_items: { type: array, items: { $ref: '#/components/schemas/MatchedItem' } }
+        reason: { type: [string, 'null'], description: AI による推薦理由 }
+
+    # ----------------------------------------------------------------- ギルド
+    GuildSummary:
+      type: object
+      required: [id, name, description, tags, member_count, capacity, is_member, is_full]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: [string, 'null'] }
+        tags: { type: array, items: { $ref: '#/components/schemas/TagRef' } }
+        member_count: { type: integer, minimum: 0 }
+        capacity: { type: integer, minimum: 1 }
+        is_member: { type: boolean }
+        is_full: { type: boolean }
+    GuildListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/GuildSummary' }
+        meta: { $ref: '#/components/schemas/PageMeta' }
+    GuildDetail:
+      allOf:
+        - $ref: '#/components/schemas/GuildSummary'
+        - type: object
+          required: [leader_info, conversation_id, my_role, joined_at]
+          properties:
+            leader_info: { type: [string, 'null'] }
+            conversation_id: { type: string, format: uuid, description: トークルームの会話ID }
+            my_role: { type: [string, 'null'], enum: [member, leader, staff, null] }
+            joined_at: { type: [string, 'null'], format: date-time }
+    GuildJoinResult:
+      type: object
+      required: [guild_id, conversation_id, member_count, capacity]
+      properties:
+        guild_id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        member_count: { type: integer }
+        capacity: { type: integer }
+    Announcement:
+      type: object
+      required: [id, title, body, published_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        body: { type: string }
+        published_at: { type: string, format: date-time }
+    GuildMember:
+      type: object
+      required: [user_id, display_name, role, character, joined_at]
+      properties:
+        user_id: { type: string, format: uuid }
+        display_name: { type: [string, 'null'] }
+        role: { type: string, enum: [member, leader, staff], description: 発言者情報（C-2）に表示 }
+        character: { $ref: '#/components/schemas/CharacterThumb' }
+        joined_at: { type: string, format: date-time }
+
+    # ----------------------------------------------------------------- 会話
+    DmThread:
+      type: object
+      required: [conversation_id, partner, last_message, has_unread, unread_count]
+      properties:
+        conversation_id: { type: string, format: uuid }
+        partner:
+          type: object
+          required: [user_id, display_name, character]
+          properties:
+            user_id: { type: string, format: uuid }
+            display_name: { type: [string, 'null'] }
+            character: { $ref: '#/components/schemas/CharacterThumb' }
+        last_message:
+          type: [object, 'null']
+          required: [body, created_at]
+          properties:
+            body: { type: [string, 'null'] }
+            created_at: { type: string, format: date-time }
+        has_unread: { type: boolean }
+        unread_count: { type: integer, minimum: 0 }
+    Message:
+      type: object
+      required: [id, conversation_id, sender, body, image_url, created_at, goodto]
+      properties:
+        id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        sender:
+          type: object
+          required: [type, user_id, display_name, role, character_thumbnail_url]
+          properties:
+            type: { type: string, enum: [user, navigator, system] }
+            user_id: { type: [string, 'null'], format: uuid, description: 退会したユーザーは null }
+            display_name: { type: string, description: 退会したユーザーは「退会したユーザー」 }
+            role: { type: [string, 'null'], enum: [member, leader, staff, null] }
+            character_thumbnail_url: { type: [string, 'null'] }
+        body: { type: [string, 'null'] }
+        image_url: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        goodto:
+          type: object
+          required: [total_count, granted_by_me]
+          properties:
+            total_count: { type: integer, minimum: 0 }
+            granted_by_me: { type: boolean }
+
+    # ----------------------------------------------------------------- グッと・成長
+    GoodtoResult:
+      type: object
+      required: [target, total_count, granted]
+      properties:
+        target:
+          type: object
+          required: [type, id]
+          properties:
+            type: { type: string, enum: [message] }
+            id: { type: string, format: uuid }
+        total_count: { type: integer, minimum: 0, description: 対象の累計グッと数 }
+        granted: { type: boolean }
+    ReceivedGoodto:
+      type: object
+      required: [id, giver, target, points, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        giver:
+          type: object
+          required: [user_id, display_name]
+          properties:
+            user_id: { type: [string, 'null'], format: uuid }
+            display_name: { type: [string, 'null'] }
+        target:
+          type: object
+          required: [type, id]
+          properties:
+            type: { type: string, enum: [message] }
+            id: { type: string, format: uuid }
+        points: { type: integer }
+        created_at: { type: string, format: date-time }
+    Growth:
+      type: object
+      required: [level, max_level, exp_total, exp_current_level_start, exp_next_level, goodto_points, next_evolution_level, image]
+      properties:
+        level: { type: integer, minimum: 1, maximum: 100 }
+        max_level: { type: integer }
+        exp_total: { type: integer, minimum: 0 }
+        exp_current_level_start: { type: integer, minimum: 0 }
+        exp_next_level: { type: [integer, 'null'], description: レベル上限では null }
+        goodto_points: { type: integer, minimum: 0 }
+        next_evolution_level: { type: [integer, 'null'], description: 次に画像が更新されるレベル（5の倍数） }
+        image: { $ref: '#/components/schemas/CharacterImage' }
+
+    # ----------------------------------------------------------------- ナビゲーター・通知・安心安全
+    NavigatorMessage:
+      type: object
+      required: [id, role, body, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        role: { type: string, enum: [user, navigator] }
+        body: { type: string }
+        created_at: { type: string, format: date-time }
+    Notification:
+      type: object
+      required: [id, type, title, body, link, created_at, read_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [goodto_received, level_up, guild_announcement, dm_received, system] }
+        title: { type: string }
+        body: { type: [string, 'null'] }
+        link: { type: [string, 'null'], description: アプリ内の遷移先 }
+        created_at: { type: string, format: date-time }
+        read_at: { type: [string, 'null'], format: date-time }
+    BlockedUser:
+      type: object
+      required: [user_id, display_name, created_at]
+      properties:
+        user_id: { type: string, format: uuid }
+        display_name: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }

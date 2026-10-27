@@ -80,7 +80,8 @@ flowchart LR
 | 項目 | 内容 |
 |---|---|
 | 利用制限 | 1ユーザー60回/分は Edge Function のインスタンス内で数える簡易方式（`_shared/rate_limit.ts`）。規模拡大時は DB または外部ストアへ移す |
-| JWT の検証 | HS256 は `JWT_SECRET`、非対称鍵（JWT Signing Keys）は JWKS で検証（`_shared/auth.ts`）。prod で JWT Signing Keys に移行する場合は `JWT_SECRET` を空にする |
+| JWT の検証 | 非対称鍵（JWT Signing Keys。CLI 2.x の local 既定は ES256）は JWKS、HS256 は `JWT_SECRET` で検証（`_shared/auth.ts`）。どちらの署名方式でも動作する |
+| API 仕様の同梱 | `GET /docs` 用に `supabase/functions/api/openapi.yaml`（正の openapi/openapi.yaml のコピー）を同梱する。openapi.yaml を変更したらコピーも更新する（`contract_test.ts` が一致を検証） |
 | モック応答 | `_shared/mock/fixtures.ts` は openapi.yaml の応答例と同じ内容。応答例を変えたら fixtures も更新し、`contract_test.ts` で一致を確認する |
 | 画像 | MockProvider は Q13・Q14・Q18・Q19・Q20 に応じた 512×512 の PNG を生成する。本実装では AiProvider の `renderCharacterImage` を差し替える |
 | 運営作業 | 管理画面がない間は Supabase Studio（postgres ロール）で登録する。Auth の app_metadata.role = admin のユーザーは RLS 上もギルド・お知らせ・質問セット・同意文書を登録できる |
